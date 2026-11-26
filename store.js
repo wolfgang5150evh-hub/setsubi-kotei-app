@@ -18,7 +18,9 @@
 //          group, name, page, rowNo,（参考：棟名・項目名・ページ・何行目か）
 //          bars: [{ task（作業内容）, vendorId（業者のid。未設定は null）,
 //                   start, end（日付 "YYYY-MM-DD"。両端を含む。月が読めなかったときだけ null）,
-//                   startCol, endCol（参考：日付の列の番号。日付が null のときの予備）}]
+//                   startCol, endCol（参考：日付の列の番号。日付が null のときの予備）,
+//                   startCap, endCap（始まり端・終わり端の形。BAR_CAPS の値。
+//                     この項目が無い古い保存データは "none"＝無し として読む → normCap）}]
 //        }]
 //      }
 //   → 設備工程は「日付」と「差し込んだ建築の行の項目名（棟名付き）」で引ける（findBars）。
@@ -43,6 +45,21 @@ export const VENDOR_COLORS = [
   { color: "#c51162", name: "桃" },
   { color: "#37474f", name: "墨" },
 ];
+
+// バーの端の形（始まり端・終わり端で共通の5種類）。value が保存される値
+//   ← → は記号の向きのまま描く（← は常に左向き、→ は常に右向き）。
+//   つまり 始まり端の「←」・終わり端の「→」が外向き、始まり端の「→」・終わり端の「←」が内向き。
+export const BAR_CAPS = [
+  { value: "none", label: "無し" },
+  { value: "dot", label: "●（塗りの丸）" },
+  { value: "ring", label: "○（白抜きの丸）" },
+  { value: "left", label: "←" },
+  { value: "right", label: "→" },
+];
+// 保存データの値を端の形にそろえる（項目が無い・知らない値は「無し」）
+export function normCap(v) {
+  return BAR_CAPS.some((c) => c.value === v) ? v : "none";
+}
 
 function readJSON(key, fallback) {
   try {
