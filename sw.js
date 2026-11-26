@@ -1,5 +1,5 @@
 // サービスワーカー：アプリ本体と PDF.js を端末に保存し、電波が弱くても開けるようにする
-const CACHE_NAME = "setsubi-koutei-v4";
+const CACHE_NAME = "setsubi-koutei-v5";
 const APP_FILES = [
   "./",
   "./index.html",
