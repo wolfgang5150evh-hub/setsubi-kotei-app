@@ -241,7 +241,7 @@ body {
   padding: 6px 8px;
 }
 .equip-panel.hidden { display: none; }
-.equip-info { line-height: 1.5; font-size: 14px; }
+.equip-info { line-height: 1.5; font-size: 14px; white-space: pre-line; }
 .equip-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 .equip-actions:empty { display: none; }
 .btn-small.primary { background: #1f4e79; color: #fff; font-weight: bold; }
@@ -276,6 +276,101 @@ body {
   font-size: 12px;
   line-height: 1.5;
   font-family: ui-monospace, "SFMono-Regular", "Menlo", "MS Gothic", monospace;
+}
+
+/* 編集画面（シート）：画面の下から出る。iPhone で入力欄が拡大されないよう文字は16px以上 */
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: #0006;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+.sheet-backdrop.hidden { display: none; }
+.sheet {
+  width: 100%;
+  max-width: 560px;
+  max-height: 88vh;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  background: #fff;
+  border-radius: 14px 14px 0 0;
+  padding: 14px 14px calc(14px + env(safe-area-inset-bottom));
+  box-shadow: 0 -4px 16px #0003;
+  font-size: 15px;
+}
+.sheet.hidden { display: none; }
+.sheet-title { margin: 0 0 4px; font-size: 17px; color: #1f4e79; }
+.sheet-sub { font-size: 13px; color: #555; margin-bottom: 10px; line-height: 1.4; }
+.field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; flex: 1 1 0; min-width: 0; }
+.field-label { font-size: 13px; color: #444; font-weight: bold; }
+.field input, .field select {
+  font-size: 16px;
+  min-height: 44px;
+  padding: 6px 10px;
+  border: 1px solid #9aa7b4;
+  border-radius: 8px;
+  background: #fff;
+  color: #222;
+  width: 100%;
+}
+.field input.hidden, .field select.hidden { display: none; }
+.field-row { display: flex; gap: 10px; }
+.field select.vendor-select { border-left: 10px solid #8a8a8a; } /* 左の太線＝選んだ業者の色（app.js で変える） */
+.sheet-note { font-size: 14px; color: #1f4e79; margin: -4px 0 10px; }
+.sheet-note.warn { color: #b00020; }
+.sheet-error { color: #b00020; font-size: 14px; min-height: 1.2em; margin: 6px 0; }
+.sheet-error:empty { min-height: 0; margin: 0; }
+.sheet-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.sheet-actions .spacer { flex: 1 1 auto; }
+.sheet .btn-small { min-height: 44px; font-size: 15px; }
+.btn-small.hidden { display: none; }
+
+/* 業者マスタ */
+.vendor-list { list-style: none; margin: 0 0 12px; padding: 0; border-top: 1px solid #dde2e8; }
+.vendor-item { display: flex; align-items: center; gap: 8px; padding: 6px 2px; border-bottom: 1px solid #dde2e8; }
+.vendor-item.editing { background: #fff6dd; }
+.vendor-empty { padding: 10px 2px; color: #666; font-size: 14px; }
+.vendor-swatch { width: 22px; height: 22px; border-radius: 50%; flex: 0 0 auto; }
+.vendor-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vendor-form { background: #f3f6f9; border-radius: 10px; padding: 10px; }
+.vendor-form-title { font-weight: bold; margin-bottom: 8px; color: #1f4e79; }
+.color-choices { display: flex; flex-wrap: wrap; gap: 8px; }
+.color-choice {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 3px solid #fff;
+  box-shadow: 0 0 0 1px #9aa7b4;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.color-choice.selected { box-shadow: 0 0 0 3px #222; }
+.color-choice.selected::after {
+  content: "✓";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: bold;
+  font-size: 18px;
+}
+/* 他の業者が使っている色：右下に小さな白い点 */
+.color-choice.used::before {
+  content: "";
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid #555;
 }
 
 /* 狭い画面ではファイル名を小さく */
