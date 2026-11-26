@@ -20,9 +20,14 @@
 //                   start, end（日付 "YYYY-MM-DD"。両端を含む。月が読めなかったときだけ null）,
 //                   startCol, endCol（参考：日付の列の番号。日付が null のときの予備）,
 //                   startCap, endCap（始まり端・終わり端の形。BAR_CAPS の値。
-//                     この項目が無い古い保存データは "none"＝無し として読む → normCap）}]
+//                     この項目が無い古い保存データは "none"＝無し として読む → normCap）,
+//                   uid（バーのid。カレンダーの予定の目印）, gcalId（Googleカレンダーの予定ID。未同期は null）}]
 //        }]
+//        siteName,  現場名（null＝ファイル名のまま）
+//        syncKey,   Googleカレンダーの予定に付ける、このPDFの目印（未同期は null）
+//        lastSyncAt 最後に同期できた時刻（ミリ秒）
 //      }
+//      ※ 現場名を付けた・同期したPDFは、設備の行が0行でも記録を残す（rows は空の配列）。
 //   → 設備工程は「日付」と「差し込んだ建築の行の項目名（棟名付き）」で引ける（findBars）。
 //     次の段階（新しい月のPDFへの入れ直し）は、この key と日付を使って行を探す。
 
