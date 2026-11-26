@@ -9,10 +9,14 @@
 //   ・業者マスタ（登録・編集・削除、業者ごとの色）。バーは業者の色で表示
 //   ・設備工程の端末内への保存と、同じPDFを開いたときの復元（store.js）
 //   ・バーの始まり端・終わり端の形（無し／●／○／←／→）を選べる
+// Googleカレンダー連携
+//   ・PDFごとの「現場名」（初期値はファイル名）。保存・復元の対象
+//   ・「カレンダーと同期」で、そのPDFのバー全体を専用カレンダー「設備工程」の終日予定と一致させる（gcal.js）
 // PDFの描画には PDF.js（CDN）を使う。元のPDF画像は書き換えず、表示上の並べ替えだけで行を差し込む。
 import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs";
 import { analyzePage } from "./reader.js";
 import * as store from "./store.js";
+import * as gcal from "./gcal.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
@@ -78,6 +82,19 @@ const vendorColorsEl = document.getElementById("vendor-colors");
 const vendorErrEl = document.getElementById("vendor-error");
 const btnVendorSave = document.getElementById("vendor-save");
 const btnVendorFormCancel = document.getElementById("vendor-form-cancel");
+// 現場名・Googleカレンダー連携
+const sitePanel = document.getElementById("site-panel");
+const siteNameEl = document.getElementById("site-name");
+const btnGcalSync = document.getElementById("btn-gcal-sync");
+const btnGcalSettings = document.getElementById("btn-gcal-settings");
+const gcalStatusEl = document.getElementById("gcal-status");
+const gcalResultEl = document.getElementById("gcal-result");
+const gcalSheetEl = document.getElementById("gcal-sheet");
+const gcalStateEl = document.getElementById("gcal-state");
+const gcalClientEl = document.getElementById("gcal-client-id");
+const gcalMsgEl = document.getElementById("gcal-msg");
+const btnGcalConnect = document.getElementById("gcal-connect");
+const btnGcalDisconnect = document.getElementById("gcal-disconnect");
 
 // ---- 状態 ----
 let pdfDoc = null;
@@ -141,6 +158,9 @@ async function openFile(file) {
     docInfo = {
       id: fileHash, sig: null, replaceId: null,
       fileName: file.name, fileSize: file.size, numPages: pdfDoc.numPages, range: null,
+      siteName: null,   // 現場名（null＝ファイル名のまま）
+      syncKey: null,    // Googleカレンダーの予定に付ける、このPDFの目印（初めて同期するときに作る）
+      lastSyncAt: null, // 最後に同期できた時刻（ミリ秒）
     };
     await setupPages();
     fitToWidth();
@@ -555,8 +575,10 @@ function resetAnalysis() {
   unplaced = [];
   restoreNote = "";
   saveStatus = null;
+  syncNote = null;
   setEquipButton();
   updateEquipPanel();
+  updateSitePanel();
 }
 
 async function startAnalysis() {
@@ -591,6 +613,7 @@ async function startAnalysis() {
   for (const p of list) if (p.equipSvg) p.equipSvg.classList.toggle("editing", equipMode);
   setEquipButton();
   updateEquipPanel();
+  updateSitePanel(); // 現場名と同期の帯（読み取りが終わってから。保存分の現場名を復元したあと）
 }
 
 function setOverlayButton(label, disabled) {
@@ -780,7 +803,8 @@ function refreshReportText() {
 
 // 下の帯（設備・読取）がどちらも隠れているときは、帯の入れ物ごと隠す
 function updateDock() {
-  const any = !equipPanel.classList.contains("hidden") || !readPanel.classList.contains("hidden");
+  const any = !equipPanel.classList.contains("hidden") || !readPanel.classList.contains("hidden")
+    || !sitePanel.classList.contains("hidden");
   dock.classList.toggle("hidden", !any);
 }
 
@@ -788,7 +812,8 @@ function updateDock() {
 // 設備の行の差し込み＋バーの配置
 // ======================================================================
 // データ（変更のたびに端末へ保存。保存の形は store.js の説明を参照）：
-//   p.equip：Map（元の行の番号 0始まり → { rowIndex, bars: [{ id, start, end, task, vendorId, startCap, endCap }], keep }）
+//   p.equip：Map（元の行の番号 0始まり → { rowIndex, bars: [{ id, start, end, task, vendorId, startCap, endCap, uid, gcalId }], keep }）
+//   uid：保存しても変わらないバーのid（カレンダーの予定の目印）。gcalId：対応するGoogleカレンダーの予定ID（未同期は null）。
 //   start・end：日付の列の番号（0始まり、両端を含む）。1列＝1日。保存するときは日付（YYYY-MM-DD）に直す。
 //   task：作業内容（文字）。vendorId：業者のid（未設定は null）。
 //   startCap・endCap：始まり端・終わり端の形（"none"｜"dot"｜"ring"｜"left"｜"right"。store.BAR_CAPS）。
@@ -1412,6 +1437,7 @@ function addBar(p, i, col) {
     id: ++barSeq, start, end: Math.min(n - 1, start + DEFAULT_BAR_DAYS - 1),
     task: "", vendorId: vendorById(lastVendorId) ? lastVendorId : null,
     startCap: DEFAULT_BAR_CAP, endCap: DEFAULT_BAR_CAP,
+    uid: store.newId("b"), gcalId: null,
   };
   ins.bars.push(bar);
   drawEquip(p);
@@ -1579,6 +1605,10 @@ function restoreSaved() {
   if (!found) return false;
   const rec = found.rec;
   docInfo.replaceId = rec.id !== docInfo.id ? rec.id : null;
+  // 現場名・カレンダー同期の目印（設備の行が無くても復元する）
+  docInfo.siteName = typeof rec.siteName === "string" && rec.siteName.trim() ? rec.siteName.trim() : null;
+  docInfo.syncKey = typeof rec.syncKey === "string" && rec.syncKey ? rec.syncKey : null;
+  docInfo.lastSyncAt = Number.isFinite(rec.lastSyncAt) ? rec.lastSyncAt : null;
   unplaced = [];
   let nRows = 0;
   let nBars = 0;
@@ -1596,6 +1626,9 @@ function restoreSaved() {
       ins.bars.push({
         id: ++barSeq, start: s, end: e, task: b.task || "", vendorId: b.vendorId || null,
         startCap: store.normCap(b.startCap), endCap: store.normCap(b.endCap),
+        // カレンダー同期用（この項目が無い古い保存データには新しく id を付ける。次の保存で書き込まれる）
+        uid: typeof b.uid === "string" && b.uid ? b.uid : store.newId("b"),
+        gcalId: typeof b.gcalId === "string" && b.gcalId ? b.gcalId : null,
       });
       nBars++;
     }
@@ -1603,7 +1636,9 @@ function restoreSaved() {
     nRows++;
   }
   const notes = [];
-  if (found.how === "file") notes.push(`前回保存した設備の行 ${nRows}行・バー ${nBars}本を復元しました。`);
+  if (!(rec.rows || []).length) {
+    // 現場名だけの保存分（設備の行は無い）
+  } else if (found.how === "file") notes.push(`前回保存した設備の行 ${nRows}行・バー ${nBars}本を復元しました。`);
   else notes.push(`同じ内容のPDF（${rec.fileName || "名前不明"}）で保存した設備の行 ${nRows}行・バー ${nBars}本を復元しました。`);
   if (unplaced.length) notes.push(`※ 行が見つからない設備の行が ${unplaced.length}行あり、表示していません（保存データには残しています）。`);
   if (kept) notes.push(`※ 工程表の日付の範囲外のバーが ${kept}本あり、表示していません（保存データには残しています）。`);
@@ -1626,6 +1661,7 @@ function serializeRows() {
           task: b.task || "", vendorId: b.vendorId || null,
           start: colISO(cols[b.start]), end: colISO(cols[b.end]), startCol: b.start, endCol: b.end,
           startCap: store.normCap(b.startCap), endCap: store.normCap(b.endCap),
+          uid: b.uid || null, gcalId: b.gcalId || null,
         }));
       out.push({
         key: p.rowKeys[c.rowIndex], group: row.group || "", name: row.name || "", page: p.no, rowNo: row.no,
@@ -1640,10 +1676,13 @@ function saveDoc() {
   if (!docInfo || !docInfo.sig) return;
   try {
     const rows = serializeRows();
-    if (rows.length) {
+    // 現場名を付けた・カレンダーと同期したPDFは、設備の行が無くても記録を残す
+    // （同期の目印を消すと、カレンダーに作った予定をあとで消せなくなるため）
+    if (rows.length || docInfo.siteName || docInfo.syncKey) {
       store.putDoc({
         id: docInfo.id, sig: docInfo.sig, fileName: docInfo.fileName, fileSize: docInfo.fileSize,
         numPages: docInfo.numPages, range: docInfo.range, rows,
+        siteName: docInfo.siteName || null, syncKey: docInfo.syncKey || null, lastSyncAt: docInfo.lastSyncAt || null,
       }, docInfo.replaceId);
     } else {
       // 設備の行がすべて無くなったら、このPDFの記録ごと消す
@@ -1676,15 +1715,14 @@ let lastAddedVendorId = null;
 function isSheetOpen() {
   return !sheetBackdrop.classList.contains("hidden");
 }
+const ALL_SHEETS = [barSheetEl, vendorSheetEl, gcalSheetEl];
 function showSheet(el) {
   sheetBackdrop.classList.remove("hidden");
-  barSheetEl.classList.toggle("hidden", el !== barSheetEl);
-  vendorSheetEl.classList.toggle("hidden", el !== vendorSheetEl);
+  for (const s of ALL_SHEETS) s.classList.toggle("hidden", s !== el);
 }
 function closeSheets() {
   sheetBackdrop.classList.add("hidden");
-  barSheetEl.classList.add("hidden");
-  vendorSheetEl.classList.add("hidden");
+  for (const s of ALL_SHEETS) s.classList.add("hidden");
   barSheet = null;
   vendorBack = false;
 }
@@ -2008,6 +2046,349 @@ btnVendorFormCancel.addEventListener("click", () => { resetVendorForm(); renderV
 vendorNameEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); saveVendor(); }
 });
+
+// ======================================================================
+// 現場名とGoogleカレンダー連携
+// ======================================================================
+// ・現場名：PDF（保存ドキュメント）ごと。初期値はファイル名（拡張子なし）。変えたら保存する。
+// ・「カレンダーと同期」：そのPDFのバー全体を、専用カレンダー「設備工程」の終日予定と一致させる。
+//   1. 専用カレンダーを用意（無ければ作る）
+//   2. このPDFの目印（syncKey）が付いた予定を全部読む
+//   3. バーごとに：対応する予定（gcalId、無ければバーの uid の目印）があれば、内容が違うときだけ更新。無ければ作成
+//   4. 3がすべて成功したときだけ、どのバーにも対応しない予定を削除
+//   途中でエラー（期限切れ・通信失敗など）になったら、そこで止める。作った予定のIDはその都度バーに記録するので、
+//   もう一度同期しても二重にはならない。削除は最後にしか行わないので、途中で止まって予定が消えることはない。
+let syncing = false;
+let syncNote = null; // null | { kind: "ok" | "error" | "busy", text }
+
+function defaultSiteName() {
+  const n = docInfo ? (docInfo.fileName || "").replace(/\.[^./\\]+$/, "").trim() : "";
+  return n || "現場名なし";
+}
+function siteNameOf() {
+  return (docInfo && docInfo.siteName) || defaultSiteName();
+}
+
+let siteSaveTimer = 0;
+// final：入力を終えたとき（空なら初期値＝ファイル名に戻す）
+function commitSiteName(final) {
+  clearTimeout(siteSaveTimer);
+  if (!docInfo || !docInfo.sig) return;
+  const v = siteNameEl.value.trim();
+  if (final && !v) siteNameEl.value = defaultSiteName();
+  const next = v && v !== defaultSiteName() ? v : null;
+  if (next === (docInfo.siteName || null)) return;
+  docInfo.siteName = next;
+  saveDoc();
+  updateEquipPanel(); // 保存できなかったときの表示
+  updateSitePanel();
+}
+siteNameEl.addEventListener("input", () => {
+  clearTimeout(siteSaveTimer);
+  siteSaveTimer = setTimeout(() => commitSiteName(false), 600);
+});
+siteNameEl.addEventListener("change", () => commitSiteName(true));
+siteNameEl.addEventListener("blur", () => commitSiteName(true));
+siteNameEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); siteNameEl.blur(); }
+});
+
+function gcalStateText() {
+  if (!gcal.getClientId()) return "Googleカレンダー：未設定（「連携設定」でクライアントIDを入れて接続してください）";
+  if (gcal.hasToken(0)) return `Googleカレンダー：接続中（同期先：専用カレンダー「${gcal.CAL_NAME}」）`;
+  if (gcal.wasConnected()) return "Googleカレンダー：接続済み（有効期限切れ。同期のときに自動で接続し直します）";
+  return "Googleカレンダー：未接続（「連携設定」で「接続」を押してください）";
+}
+function fmtTime(ms) {
+  const d = new Date(ms);
+  return `${d.getMonth() + 1}/${d.getDate()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+function updateSitePanel() {
+  const show = !!(docInfo && docInfo.sig);
+  sitePanel.classList.toggle("hidden", !show);
+  if (show) {
+    if (document.activeElement !== siteNameEl) siteNameEl.value = siteNameOf();
+    siteNameEl.placeholder = defaultSiteName();
+    btnGcalSync.disabled = syncing;
+    btnGcalSync.textContent = syncing ? "同期中…" : "カレンダーと同期";
+    gcalStatusEl.textContent = gcalStateText() + "　"
+      + (docInfo.lastSyncAt ? `前回の同期：${fmtTime(docInfo.lastSyncAt)}` : "このPDFはまだ同期していません。");
+    gcalResultEl.textContent = syncNote ? syncNote.text : "";
+    gcalResultEl.className = "gcal-result" + (syncNote && syncNote.kind !== "ok" ? " " + syncNote.kind : "");
+  }
+  updateDock();
+}
+function setSyncNote(kind, text) {
+  syncNote = { kind, text };
+  updateSitePanel();
+}
+// 接続の残り時間などの表示を、1分ごとに更新する
+setInterval(() => {
+  if (!syncing && !sitePanel.classList.contains("hidden")) updateSitePanel();
+  if (isSheetOpen() && !gcalSheetEl.classList.contains("hidden")) renderGcalSheet();
+}, 60_000);
+
+// 予定のタイトル：「作業内容（業者名）」。業者が未設定なら「作業内容」のみ。
+// 現場名はタイトルに入れず、予定の「場所」（location）に入れる（2026-11-26 ユーザー指示）
+function eventTitle(bar) {
+  const v = vendorById(bar.vendorId);
+  return `${bar.task || EQUIP_LABEL}${v ? `（${v.name}）` : ""}`;
+}
+// 予定の説明欄：棟名付きの項目名・業者名・期間など
+function eventDescription(p, rowIndex, bar, site) {
+  const v = vendorById(bar.vendorId);
+  return [
+    `項目：${rowFullName(p, rowIndex)}／${EQUIP_LABEL}`,
+    `業者：${v ? v.name : "未設定"}`,
+    `期間：${barRangeText(p, bar, true)}`,
+    `作業内容：${bar.task || "（未入力）"}`,
+    `現場：${site}`,
+    "",
+    "※ 設備工程管理アプリから同期した予定です。変更はアプリで行ってください（次の同期でアプリの内容に戻ります）。",
+  ].join("\n");
+}
+
+// ---- 「カレンダーと同期」ボタン ----
+// ※ 接続の取り直し（Googleの画面）はクリックの中で await より前に始める必要があるので、ここは同期的に進める
+btnGcalSync.addEventListener("click", () => {
+  if (syncing || !docInfo || !docInfo.sig) return;
+  commitSiteName(true); // 入力途中の現場名を先に確定
+  if (!gcal.getClientId()) {
+    setSyncNote("error", "Googleカレンダー連携がまだ設定されていないため、同期していません。「連携設定」でクライアントIDを入れて「接続」してください。");
+    openGcalSheet("先に、Google Cloud Console で作ったOAuthクライアントIDを入れて「接続」を押してください（作り方は下の「クライアントIDの作り方」）。", false);
+    return;
+  }
+  if (!gcal.wasConnected() && !gcal.hasToken()) {
+    setSyncNote("error", "Googleカレンダーに未接続のため、同期していません。「連携設定」で「接続」を押してください。");
+    openGcalSheet("「接続」を押して、Googleアカウントでカレンダーへのアクセスを許可してください。", false);
+    return;
+  }
+  if (navigator.onLine === false) {
+    setSyncNote("error", "インターネットにつながっていないため、同期していません（カレンダーの予定は変えていません）。");
+    return;
+  }
+  if (saveStatus && !saveStatus.ok) {
+    setSyncNote("error", "端末への保存ができていないため、同期を止めました（予定とバーの対応を記録できないため）。");
+    return;
+  }
+  if (gcal.hasToken()) { runSync(); return; }
+  // 有効期限切れ：このクリックの中で静かに取り直す（許可済みなら、Googleの画面は出てもすぐ閉じる）
+  const doc = docInfo;
+  syncing = true;
+  setSyncNote("busy", "Googleカレンダーに接続し直しています…");
+  gcal.requestToken(false).then(() => {
+    syncing = false;
+    if (docInfo === doc) runSync(); else updateSitePanel();
+  }, (err) => {
+    syncing = false;
+    if (docInfo !== doc) { updateSitePanel(); return; }
+    setSyncNote("error", "Googleカレンダーとの接続の有効期限が切れていて、自動で接続し直せませんでした。同期はしていません（カレンダーの予定は変えていません）。\n"
+      + `「連携設定」で「接続」を押し直してください。（${err.message}）`);
+  });
+});
+
+async function runSync() {
+  const doc = docInfo;
+  if (!doc || !doc.sig || syncing) return;
+  syncing = true;
+  const n = { created: 0, updated: 0, deleted: 0, same: 0 };
+  const checkDoc = () => {
+    if (docInfo !== doc) throw new gcal.GcalError("abort", "別のPDFを開いたため、同期を途中で止めました。");
+  };
+  const saveIfSame = () => { if (docInfo === doc) saveDoc(); };
+  setSyncNote("busy", "Googleカレンダーと同期しています…");
+  let calCreated = false;
+  let noDate = 0;
+  try {
+    if (!doc.syncKey) {
+      doc.syncKey = store.newId("d");
+      saveDoc();
+      if (!saveStatus || !saveStatus.ok) throw new gcal.GcalError("save", "端末に保存できないため、同期を止めました。");
+    }
+    const site = siteNameOf();
+    // 作りたい予定の一覧（表示しているバー全部）
+    const want = [];
+    const keepIds = new Set(); // 消さない予定：表示していない保存分のバー・日付が読めないバーに対応する予定
+    for (const p of pages) {
+      if (!p.result || !p.result.dates || !p.result.rows) continue;
+      const cols = p.result.dates.columns;
+      for (const c of p.cuts) {
+        const ins = p.equip.get(c.rowIndex);
+        if (!ins) continue;
+        for (const bar of ins.bars) {
+          if (!bar.uid) bar.uid = store.newId("b");
+          const s = colISO(cols[bar.start]);
+          const e = colISO(cols[bar.end]);
+          if (!s || !e) {
+            noDate++;
+            if (bar.gcalId) keepIds.add(bar.gcalId);
+            continue;
+          }
+          want.push({
+            bar,
+            body: gcal.makeEvent({
+              summary: eventTitle(bar), location: site, description: eventDescription(p, c.rowIndex, bar, site),
+              start: s, end: e, docKey: doc.syncKey, barUid: bar.uid,
+            }),
+          });
+        }
+        for (const b of ins.keep || []) if (b.gcalId) keepIds.add(b.gcalId);
+      }
+    }
+    for (const r of unplaced) for (const b of r.bars || []) if (b.gcalId) keepIds.add(b.gcalId);
+
+    const cal = await gcal.ensureCalendar();
+    calCreated = cal.created;
+    checkDoc();
+    const events = await gcal.listDocEvents(cal.id, doc.syncKey);
+    checkDoc();
+    const byId = new Map(events.map((ev) => [ev.id, ev]));
+    const byUid = new Map();
+    for (const ev of events) {
+      const u = gcal.eventBarUid(ev);
+      if (u && !byUid.has(u)) byUid.set(u, ev);
+    }
+    const used = new Set();
+    // 作成・更新
+    for (const w of want) {
+      checkDoc();
+      let ev = (w.bar.gcalId && byId.get(w.bar.gcalId)) || byUid.get(w.bar.uid) || null;
+      if (ev && used.has(ev.id)) ev = null;
+      if (ev) {
+        used.add(ev.id);
+        if (w.bar.gcalId !== ev.id) { w.bar.gcalId = ev.id; saveIfSame(); }
+        if (gcal.sameEvent(ev, w.body)) n.same++;
+        else { await gcal.updateEvent(cal.id, ev.id, w.body); n.updated++; }
+      } else {
+        const made = await gcal.createEvent(cal.id, w.body);
+        used.add(made.id);
+        w.bar.gcalId = made.id;
+        n.created++;
+        saveIfSame(); // 予定IDをすぐ記録（途中で止まっても、次の同期で二重に作らない）
+      }
+    }
+    // バーが消えた予定の削除（作成・更新がすべて成功したときだけ）
+    for (const ev of events) {
+      if (used.has(ev.id) || keepIds.has(ev.id)) continue;
+      checkDoc();
+      await gcal.deleteEvent(cal.id, ev.id);
+      n.deleted++;
+    }
+    checkDoc();
+    doc.lastSyncAt = Date.now();
+    saveDoc();
+    let text = `同期しました（${fmtTime(doc.lastSyncAt)}）：作成 ${n.created}件・更新 ${n.updated}件・削除 ${n.deleted}件（変更なし ${n.same}件）`;
+    if (calCreated) text += `\n専用カレンダー「${gcal.CAL_NAME}」を新しく作りました。`;
+    if (noDate) text += `\n※ 日付（月）が読めない列にあるバー ${noDate}本は同期していません。`;
+    if (keepIds.size) text += `\n※ 同期の対象外のバー（表示していない保存分・日付が読めないもの）の予定 ${keepIds.size}件は、そのまま残しています。`;
+    if (saveStatus && !saveStatus.ok) text += "\n※ 予定IDを端末に保存できませんでした。";
+    syncNote = { kind: saveStatus && !saveStatus.ok ? "error" : "ok", text };
+  } catch (err) {
+    console.error("カレンダーの同期に失敗", err);
+    if (docInfo === doc) {
+      const known = err instanceof gcal.GcalError;
+      const reason = known ? err.message : `思わぬエラーが起きました（${(err && err.message) || err}）。`;
+      const hint = !known ? ""
+        : err.kind === "expired" ? "もう一度「カレンダーと同期」を押してください（自動で接続し直します）。"
+          : err.kind === "network" ? "電波のよい所で、もう一度「カレンダーと同期」を押してください。"
+            : err.kind === "denied" ? "「連携設定」で「接続」を押し直してください。"
+              : "";
+      const done = n.created + n.updated + n.deleted;
+      syncNote = {
+        kind: "error",
+        text: `同期を途中で止めました。${reason}${hint ? "\n" + hint : ""}\n`
+          + (done
+            ? `（止まるまでに：作成 ${n.created}件・更新 ${n.updated}件・削除 ${n.deleted}件。作った予定はバーと対応づけて記録済みなので、もう一度同期しても二重にはなりません。消える予定の削除は、全部の作成・更新が済んでから行います）`
+            : "（カレンダーの予定は変えていません）"),
+      };
+    }
+  } finally {
+    syncing = false;
+    if (docInfo === doc) {
+      refreshReportText();
+      updateEquipPanel();
+      updateSitePanel();
+    }
+  }
+}
+
+// ---- 連携設定の画面 ----
+function setGcalMsg(text, kind = "error") {
+  gcalMsgEl.textContent = text;
+  gcalMsgEl.classList.toggle("info", kind === "info");
+}
+function renderGcalSheet() {
+  let s;
+  if (!gcal.getClientId()) s = "状態：未設定（クライアントIDを入れてください）";
+  else if (gcal.hasToken(0)) s = `状態：接続中（あと約${gcal.tokenMinutesLeft()}分有効。切れたら、同期のときに自動で取り直します）`;
+  else if (gcal.wasConnected()) s = "状態：接続済み・有効期限切れ（同期のときに自動で接続し直します。うまくいかないときは「接続」を押してください）";
+  else s = "状態：未接続";
+  gcalStateEl.textContent = s;
+  btnGcalDisconnect.disabled = !(gcal.wasConnected() || gcal.hasToken(0));
+  btnGcalConnect.textContent = gcal.hasToken(0) ? "接続し直す" : "接続";
+}
+function openGcalSheet(note = "", isError = false) {
+  gcalClientEl.value = gcal.getClientId();
+  setGcalMsg(note, isError ? "error" : "info");
+  renderGcalSheet();
+  gcal.loadGis().catch(() => {}); // 「接続」を押したときにすぐGoogleの画面を出せるよう、先に読み込んでおく
+  showSheet(gcalSheetEl);
+}
+// 入力欄のクライアントIDを保存する（形が違えば false）
+function applyClientIdInput() {
+  const v = gcalClientEl.value.trim();
+  if (v && !gcal.isValidClientId(v)) {
+    setGcalMsg("クライアントIDの形が違います。「〜.apps.googleusercontent.com」で終わる文字を、そのまま貼り付けてください。");
+    return false;
+  }
+  if (v !== gcal.getClientId()) {
+    gcal.setClientId(v);
+    syncNote = null;
+    setGcalMsg(v ? "クライアントIDを保存しました。「接続」を押してください。" : "クライアントIDを消しました。", "info");
+  }
+  renderGcalSheet();
+  updateSitePanel();
+  return true;
+}
+gcalClientEl.addEventListener("change", applyClientIdInput);
+gcalClientEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); gcalClientEl.blur(); }
+});
+btnGcalConnect.addEventListener("click", () => {
+  if (!applyClientIdInput()) return;
+  if (!gcal.getClientId()) { setGcalMsg("クライアントIDを入れてください。"); return; }
+  setGcalMsg("Googleの画面で、アカウントを選んでカレンダーへのアクセスを許可してください…", "info");
+  gcal.requestToken(true).then(async () => {
+    renderGcalSheet();
+    updateSitePanel();
+    setGcalMsg(`接続しました。専用カレンダー「${gcal.CAL_NAME}」を確認しています…`, "info");
+    try {
+      const c = await gcal.ensureCalendar();
+      setGcalMsg(`接続しました。専用カレンダー「${gcal.CAL_NAME}」を${c.created ? "新しく作りました" : "確認しました"}。`
+        + "画面下の「カレンダーと同期」で予定を送れます。", "info");
+    } catch (err) {
+      setGcalMsg(`接続はできましたが、専用カレンダーを用意できませんでした。${err.message}`);
+    }
+  }, (err) => {
+    setGcalMsg(err.message);
+    renderGcalSheet();
+    updateSitePanel();
+  });
+});
+btnGcalDisconnect.addEventListener("click", async () => {
+  if (!confirm("Googleカレンダーとの接続を解除しますか？\n（作成済みの予定は、カレンダー「設備工程」に残ります）")) return;
+  const revoked = await gcal.disconnect();
+  syncNote = null;
+  renderGcalSheet();
+  updateSitePanel();
+  setGcalMsg(revoked
+    ? "接続を解除しました。"
+    : "接続を解除しました。（Google側の許可も外すには、Googleアカウントの「サードパーティ製のアプリとサービス」から外してください）", "info");
+});
+document.getElementById("gcal-close").addEventListener("click", closeSheets);
+btnGcalSettings.addEventListener("click", () => openGcalSheet());
+// クライアントIDが設定済みなら、Googleのログイン部品を先に読み込んでおく（同期ボタンですぐ接続し直せるように）
+if (gcal.getClientId()) gcal.loadGis().catch(() => {});
 
 // ---- PWA：サービスワーカー登録（http/https のときだけ） ----
 if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
