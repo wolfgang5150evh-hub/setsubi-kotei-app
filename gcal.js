@@ -5,6 +5,8 @@
 //     クライアントIDは利用者が Google Cloud Console で作り、アプリの「連携設定」で入れる（localStorage に保存）。
 //   ・Calendar API（https://www.googleapis.com/calendar/v3）を fetch で直接呼ぶ。
 //   ・予定は専用カレンダー「設備工程」だけに作る。ほかのカレンダーには触らない。
+//   ・双方向同期：カレンダー側の変更・削除・新規予定の取り込みは app.js の同期処理が行う
+//     （このファイルは API の呼び出しと予定の形だけを担当する）。
 //   ・アプリが作った予定には extendedProperties.private に目印を付ける：
 //       setsubiKotei="1"、setsubiDoc＝PDFごとの同期キー、setsubiBar＝バーごとのid
 //     → 同期のときは「このPDFの目印が付いた予定」だけを読み、作成・更新・削除する。
@@ -262,7 +264,7 @@ export async function ensureCalendar() {
   const cal = await api("POST", "/calendars", {
     body: {
       summary: CAL_NAME,
-      description: "設備工程管理アプリが予定を作る専用のカレンダーです。予定の変更はアプリで行ってください（同期のたびにアプリの内容に合わせます）。",
+      description: "設備工程管理アプリと同期する専用のカレンダーです。アプリで作った予定は目印付きです。カレンダー側で変更・削除した内容や、場所が現場名と一致する新規予定は、次の同期でアプリに取り込まれます。",
       timeZone: "Asia/Tokyo",
     },
   });
@@ -278,6 +280,20 @@ export async function listDocEvents(calId, docKey) {
   do {
     const r = await api("GET", `/calendars/${enc(calId)}/events`, {
       query: { privateExtendedProperty: `${TAG_DOC}=${docKey}`, maxResults: 2500, showDeleted: "false", pageToken },
+    });
+    out.push(...((r && r.items) || []));
+    pageToken = r && r.nextPageToken;
+  } while (pageToken);
+  return out;
+}
+
+// 専用カレンダーの予定をすべて読む（目印なしの新規予定の取り込み判定に使う。ほかのカレンダーには触らない）
+export async function listAllEvents(calId) {
+  const out = [];
+  let pageToken = null;
+  do {
+    const r = await api("GET", `/calendars/${enc(calId)}/events`, {
+      query: { maxResults: 2500, showDeleted: "false", singleEvents: "true", pageToken },
     });
     out.push(...((r && r.items) || []));
     pageToken = r && r.nextPageToken;
@@ -302,6 +318,12 @@ export async function deleteEvent(calId, eventId) {
 }
 
 // ---- 予定の形 ----
+// "2026-11-13" の前日 "2026-11-12"（終日予定の end（翌日指定）を取り込むときに使う）
+export function prevDay(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d - 1)).toISOString().slice(0, 10);
+}
+
 // "2026-11-12" の翌日 "2026-11-13"（Calendar API の終日予定の end は「終わりの翌日」を指定する）
 export function nextDay(iso) {
   const [y, m, d] = iso.split("-").map(Number);
@@ -319,6 +341,13 @@ export function makeEvent({ summary, location = "", description, start, end, doc
     end: { date: nextDay(end) },
     extendedProperties: { private: { [TAG_APP]: "1", [TAG_DOC]: docKey, [TAG_BAR]: barUid } },
   };
+}
+
+export function eventDocKey(ev) {
+  return (ev && ev.extendedProperties && ev.extendedProperties.private && ev.extendedProperties.private[TAG_DOC]) || null;
+}
+export function isAppEvent(ev) {
+  return !!((ev && ev.extendedProperties && ev.extendedProperties.private && ev.extendedProperties.private[TAG_APP]) === "1");
 }
 
 export function eventBarUid(ev) {
