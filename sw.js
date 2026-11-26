@@ -1,5 +1,7 @@
 // サービスワーカー：アプリ本体と PDF.js を端末に保存し、電波が弱くても開けるようにする
-const CACHE_NAME = "setsubi-koutei-v5";
+// Googleのログイン部品（accounts.google.com）・Calendar API（www.googleapis.com）は別の場所なので、
+// 下の fetch では扱わない（保存せず、そのままネットに取りに行く）。
+const CACHE_NAME = "setsubi-koutei-v7";
 const APP_FILES = [
   "./",
   "./index.html",
@@ -7,6 +9,7 @@ const APP_FILES = [
   "./app.js",
   "./reader.js",
   "./store.js",
+  "./gcal.js",
   "./manifest.webmanifest",
   "./icon.svg",
 ];
