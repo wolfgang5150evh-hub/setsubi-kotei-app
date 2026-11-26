@@ -40,6 +40,20 @@
 
   <!-- 画面下の帯 -->
   <footer id="bottom-dock" class="bottom-dock hidden">
+    <!-- 現場名とGoogleカレンダーの同期（開いているPDFごと） -->
+    <section id="site-panel" class="site-panel hidden">
+      <div class="site-row">
+        <label class="site-field">
+          <span class="site-label">現場名</span>
+          <input id="site-name" type="text" maxlength="40" autocomplete="off" enterkeyhint="done" aria-label="現場名（カレンダーの予定の名前に使います）">
+        </label>
+        <button id="btn-gcal-sync" class="btn-small primary" type="button">カレンダーと同期</button>
+        <button id="btn-gcal-settings" class="btn-small" type="button">連携設定</button>
+      </div>
+      <div id="gcal-status" class="gcal-status"></div>
+      <div id="gcal-result" class="gcal-result" role="status"></div>
+    </section>
+
     <!-- 設備の行・バーの操作 -->
     <section id="equip-panel" class="equip-panel hidden">
       <div id="equip-info" class="equip-info"></div>
@@ -128,6 +142,38 @@
       <div class="sheet-actions">
         <span class="spacer"></span>
         <button id="vendor-close" class="btn-small" type="button">閉じる</button>
+      </div>
+    </section>
+
+    <section id="gcal-sheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="gcal-sheet-title">
+      <h2 id="gcal-sheet-title" class="sheet-title">Googleカレンダー連携</h2>
+      <div id="gcal-state" class="sheet-sub"></div>
+      <label class="field">
+        <span class="field-label">OAuthクライアントID</span>
+        <input id="gcal-client-id" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+               placeholder="例：123456-abc.apps.googleusercontent.com" enterkeyhint="done">
+      </label>
+      <div class="sheet-note">
+        予定は専用のカレンダー「設備工程」だけに作ります（無ければ自動で作ります）。ほかのカレンダーには触りません。
+      </div>
+      <details class="gcal-help">
+        <summary>クライアントIDの作り方（Google Cloud Console）</summary>
+        <ol>
+          <li>Google Cloud Console でプロジェクトを作る</li>
+          <li>「APIとサービス」→「ライブラリ」で <b>Google Calendar API</b> を有効にする</li>
+          <li>「OAuth同意画面」を設定する（対象：外部。テストユーザーに自分のGmailを追加）</li>
+          <li>「認証情報」→「OAuthクライアントID」を作る（種類：ウェブアプリケーション）</li>
+          <li>「承認済みのJavaScript生成元」に <b>https://wolfgang5150evh-hub.github.io</b> を登録</li>
+          <li>表示されたクライアントIDを上の欄に貼り付けて「接続」</li>
+        </ol>
+        <div>※ 初めて接続するとき「このアプリは Google で確認されていません」と出ることがあります。自分で作ったアプリなので「詳細」→「（アプリ名）に移動」で進めます。</div>
+      </details>
+      <div id="gcal-msg" class="sheet-error" role="alert"></div>
+      <div class="sheet-actions">
+        <button id="gcal-disconnect" class="btn-small danger" type="button">解除</button>
+        <span class="spacer"></span>
+        <button id="gcal-close" class="btn-small" type="button">閉じる</button>
+        <button id="gcal-connect" class="btn-small primary" type="button">接続</button>
       </div>
     </section>
   </div>
