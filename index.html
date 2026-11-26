@@ -59,6 +59,69 @@
     </section>
   </footer>
 
+  <!-- 編集画面（シート）：バーの編集・業者マスタ -->
+  <div id="sheet-backdrop" class="sheet-backdrop hidden">
+    <section id="bar-sheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="bar-sheet-title">
+      <h2 id="bar-sheet-title" class="sheet-title">バーの編集</h2>
+      <div id="bar-sheet-row" class="sheet-sub"></div>
+      <label class="field">
+        <span class="field-label">作業内容</span>
+        <input id="bar-task" type="text" maxlength="40" placeholder="例：給水配管" autocomplete="off" enterkeyhint="done">
+      </label>
+      <div class="field-row">
+        <label class="field">
+          <span class="field-label">開始日</span>
+          <input id="bar-start" type="date">
+          <select id="bar-start-sel" class="hidden"></select>
+        </label>
+        <label class="field">
+          <span class="field-label">終了日</span>
+          <input id="bar-end" type="date">
+          <select id="bar-end-sel" class="hidden"></select>
+        </label>
+      </div>
+      <div id="bar-days" class="sheet-note"></div>
+      <label class="field">
+        <span class="field-label">下請け業者</span>
+        <select id="bar-vendor" class="vendor-select"></select>
+      </label>
+      <button id="bar-vendor-manage" class="btn-small" type="button">業者の登録・編集</button>
+      <div id="bar-error" class="sheet-error" role="alert"></div>
+      <div class="sheet-actions">
+        <button id="bar-delete" class="btn-small danger" type="button">バーを削除</button>
+        <span class="spacer"></span>
+        <button id="bar-cancel" class="btn-small" type="button">やめる</button>
+        <button id="bar-ok" class="btn-small primary" type="button">決定</button>
+      </div>
+    </section>
+
+    <section id="vendor-sheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="vendor-sheet-title">
+      <h2 id="vendor-sheet-title" class="sheet-title">業者の登録・編集</h2>
+      <ul id="vendor-list" class="vendor-list"></ul>
+      <div class="vendor-form">
+        <div id="vendor-form-title" class="vendor-form-title">新しい業者を登録</div>
+        <label class="field">
+          <span class="field-label">業者名</span>
+          <input id="vendor-name" type="text" maxlength="30" placeholder="例：○○設備" autocomplete="off" enterkeyhint="done">
+        </label>
+        <div class="field">
+          <span class="field-label">色（候補から選ぶ）</span>
+          <div id="vendor-colors" class="color-choices" role="radiogroup" aria-label="業者の色"></div>
+        </div>
+        <div id="vendor-error" class="sheet-error" role="alert"></div>
+        <div class="sheet-actions">
+          <button id="vendor-form-cancel" class="btn-small hidden" type="button">編集をやめる</button>
+          <span class="spacer"></span>
+          <button id="vendor-save" class="btn-small primary" type="button">登録</button>
+        </div>
+      </div>
+      <div class="sheet-actions">
+        <span class="spacer"></span>
+        <button id="vendor-close" class="btn-small" type="button">閉じる</button>
+      </div>
+    </section>
+  </div>
+
   <script type="module" src="app.js"></script>
 </body>
 </html>
