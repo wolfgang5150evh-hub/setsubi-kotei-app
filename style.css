@@ -185,6 +185,7 @@ body {
 /* バー：太さ（stroke-width）・文字の大きさは行の高さに合わせて app.js で決める */
 .eq-bar-line { stroke: #1565c0; stroke-linecap: butt; fill: none; }
 .eq-bar-head { fill: #1565c0; }
+.eq-bar-cap { fill: #1565c0; }              /* 端の丸（●は業者の色で塗る／○は白で塗り業者の色の線。app.js で指定） */
 .eq-bar-label {
   fill: #0d47a1;
   paint-order: stroke;
