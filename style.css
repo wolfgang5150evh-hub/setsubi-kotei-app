@@ -1,0 +1,285 @@
+/* 設備工程管理アプリ：見た目 */
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  font-family: system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
+  background: #e8ebef;
+  color: #222;
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior: none;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 上部の操作バー（スマホで押しやすい大きさ） */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  padding-top: calc(8px + env(safe-area-inset-top));
+  padding-left: calc(8px + env(safe-area-inset-left));
+  padding-right: calc(8px + env(safe-area-inset-right));
+  background: #1f4e79;
+  color: #fff;
+  flex: 0 0 auto;
+  flex-wrap: wrap;   /* 狭い画面ではボタンを2段に折り返す（「設備」ボタンが増えたため） */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.btn {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 8px;
+  background: #ffffff22;
+  color: #fff;
+  font-size: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.btn:active { background: #ffffff44; }
+.btn-main { background: #f0a020; color: #222; font-weight: bold; font-size: 16px; white-space: nowrap; }
+.btn-main:active { background: #ffc050; }
+
+.file-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  opacity: 0.9;
+}
+
+.zoom-group { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; margin-left: auto; }
+.zoom-label { min-width: 3.5em; text-align: center; font-size: 13px; }
+
+/* 表示エリア：ブラウザ標準のスクロール・拡大は止めて、自前で処理する */
+.viewer {
+  position: relative;
+  flex: 1 1 auto;
+  overflow: hidden;
+  touch-action: none;
+  cursor: grab;
+  background: #e8ebef;
+}
+.viewer.dragging { cursor: grabbing; }
+
+.stage {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.page {
+  position: absolute;
+  left: 0;
+  background: #fff;
+  box-shadow: 0 1px 6px #0003;
+}
+/* ページの画像：差し込みがなければ1枚（full）、あれば行の境目で切った短冊（strip）を並べる */
+.page-img {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+.page-img canvas.full {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.page-img canvas.strip {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  display: block;
+}
+
+.message {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px;
+  font-size: 15px;
+  line-height: 1.8;
+  color: #555;
+  pointer-events: none;
+}
+.message.hidden { display: none; }
+.message.error { color: #b00020; }
+
+/* 「読取」ボタン：オンのときは色を変える */
+.btn-toggle { font-size: 15px; white-space: nowrap; }
+.btn-toggle.on { background: #4fc3f7; color: #00263d; font-weight: bold; }
+.btn:disabled { opacity: 0.45; cursor: default; }
+
+/* 重ね表示（PDFと同じ pt 座標の SVG。ページと一緒に拡大縮小される） */
+.overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 2;
+}
+.ov-colband { fill: rgba(0, 110, 255, 0.07); }
+.ov-rowband { fill: rgba(230, 0, 60, 0.07); }
+.ov-bad { fill: rgba(255, 0, 0, 0.35); }
+.ov-colline { stroke: rgba(0, 100, 255, 0.8); stroke-width: 0.4; }
+.ov-rowline { stroke: rgba(225, 0, 40, 0.85); stroke-width: 0.5; }
+.ov-namearea { fill: none; stroke: rgba(0, 150, 60, 0.8); stroke-width: 0.5; stroke-dasharray: 2 1.5; }
+.ov-groupline { fill: none; stroke: rgba(120, 0, 160, 0.85); stroke-width: 0.6; }
+.overlay text {
+  font-family: system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
+  paint-order: stroke;
+  stroke: #fff;
+  stroke-width: 0.6px;
+  stroke-linejoin: round;
+}
+.ov-day { font-size: 4px; fill: #0050c8; text-anchor: middle; }
+.ov-day-sat { fill: #0080ff; font-weight: bold; }
+.ov-day-sun { fill: #e00030; font-weight: bold; }
+.ov-day-bad { fill: #ff0000; font-weight: bold; }
+.ov-day-filled { font-style: italic; text-decoration: underline; }
+.ov-month { font-size: 4.5px; fill: #003a8c; font-weight: bold; }
+.ov-rowlabel { font-size: 4.5px; fill: #c00020; }
+.ov-grouplabel { font-size: 4.5px; fill: #6a0090; text-anchor: end; }
+
+/* 設備の行・バー（ページと同じ pt 座標の SVG） */
+.equip-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 1;
+}
+.eq-base { fill: #dfeaf7; }                 /* 設備の行の地の色（完成イメージの薄い青） */
+.eq-gridline { fill: none; stroke: #9aa7b4; stroke-width: 0.25; }
+.eq-border { fill: none; stroke: #333; stroke-width: 0.5; }
+.equip-layer text {
+  font-family: system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
+}
+.eq-name { fill: #1f3550; text-anchor: end; }
+/* バー：太さ（stroke-width）・文字の大きさは行の高さに合わせて app.js で決める */
+.eq-bar-line { stroke: #1565c0; stroke-linecap: butt; fill: none; }
+.eq-bar-head { fill: #1565c0; }
+.eq-bar-label {
+  fill: #0d47a1;
+  paint-order: stroke;
+  stroke: #fff;
+  stroke-width: 0.5px;
+  stroke-linejoin: round;
+}
+.eq-bar-sel { fill: rgba(255, 170, 0, 0.22); stroke: #ff8f00; stroke-width: 0.4; }
+.eq-handle { fill: #fff; stroke: #ff8f00; stroke-width: 0.5; }
+.eq-selrow { fill: rgba(255, 200, 0, 0.14); stroke: #ff8f00; stroke-width: 0.7; }
+.eq-cell { fill: rgba(255, 140, 0, 0.28); stroke: #ff6f00; stroke-width: 0.5; }
+/* バーをつかむための透明な範囲（「設備」がオンのときだけ反応） */
+.eq-hit { fill: transparent; stroke: none; pointer-events: none; }
+.equip-layer.editing .eq-hit { pointer-events: all; }
+.equip-layer.editing .eq-hit-body { cursor: grab; }
+.equip-layer.editing .eq-hit-end { cursor: ew-resize; }
+
+/* 「設備」ボタン：オンのときは黄色 */
+.btn-equip.on { background: #ffd54f; color: #3a2a00; font-weight: bold; }
+
+/* ドラッグ中の日付の吹き出し */
+.drag-tip {
+  position: absolute;
+  z-index: 5;
+  transform: translate(-50%, -100%);
+  background: #1f4e79;
+  color: #fff;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 15px;
+  font-weight: bold;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 2px 6px #0004;
+}
+.drag-tip.hidden { display: none; }
+
+/* 画面下の帯（設備の操作＋読み取り結果） */
+.bottom-dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
+  background: #ffffffee;
+  box-shadow: 0 -2px 8px #0002;
+  padding-bottom: env(safe-area-inset-bottom);
+  font-size: 13px;
+}
+.bottom-dock.hidden { display: none; }
+
+.equip-panel {
+  border-top: 2px solid #ffb300;
+  padding: 6px 8px;
+}
+.equip-panel.hidden { display: none; }
+.equip-info { line-height: 1.5; font-size: 14px; }
+.equip-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.equip-actions:empty { display: none; }
+.btn-small.primary { background: #1f4e79; color: #fff; font-weight: bold; }
+.btn-small.danger { border-color: #b00020; color: #b00020; }
+
+/* 読み取り結果の帯 */
+.read-panel {
+  border-top: 2px solid #4fc3f7;
+  padding: 6px 8px;
+}
+.read-panel.hidden { display: none; }
+.read-bar { display: flex; align-items: center; gap: 8px; }
+.read-summary { flex: 1 1 auto; min-width: 0; line-height: 1.4; }
+.btn-small {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid #1f4e79;
+  border-radius: 8px;
+  background: #fff;
+  color: #1f4e79;
+  font-size: 14px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.read-detail { margin-top: 6px; max-height: 45vh; overflow: auto; -webkit-overflow-scrolling: touch; }
+.read-detail.hidden { display: none; }
+.read-detail-text {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 12px;
+  line-height: 1.5;
+  font-family: ui-monospace, "SFMono-Regular", "Menlo", "MS Gothic", monospace;
+}
+
+/* 狭い画面ではファイル名を小さく */
+@media (max-width: 420px) {
+  .file-name { font-size: 11px; }
+  .btn { padding: 0 8px; }
+}
