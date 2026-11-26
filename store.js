@@ -21,7 +21,11 @@
 //                   startCol, endCol（参考：日付の列の番号。日付が null のときの予備）,
 //                   startCap, endCap（始まり端・終わり端の形。BAR_CAPS の値。
 //                     この項目が無い古い保存データは "none"＝無し として読む → normCap）,
-//                   uid（バーのid。カレンダーの予定の目印）, gcalId（Googleカレンダーの予定ID。未同期は null）}]
+//                   uid（バーのid。カレンダーの予定の目印）, gcalId（Googleカレンダーの予定ID。未同期は null）,
+//                   updatedAt（バーのローカル最終変更時刻。ISO文字列。作成・編集・移動・伸縮のたびに更新）,
+//                   gcalUpdated（前回同期時に見た予定の updated。ISO文字列）,
+//                   lastSyncSnapshot（前回同期時点の { task, vendorId, start, end }。双方向同期の変更判定に使う）}]
+//        pendingBars, カレンダーから取り込んだが配置先の行が決まらなかったバー（上の bars と同じ形の一覧）
 //        }]
 //        siteName,  現場名（null＝ファイル名のまま）
 //        syncKey,   Googleカレンダーの予定に付ける、このPDFの目印（未同期は null）
