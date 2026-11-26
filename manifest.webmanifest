@@ -1,0 +1,15 @@
+{
+  "name": "設備工程管理",
+  "short_name": "設備工程",
+  "description": "建築工程表のPDFに設備工事の工程を重ねて管理するアプリ",
+  "lang": "ja",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#e8ebef",
+  "theme_color": "#1f4e79",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
