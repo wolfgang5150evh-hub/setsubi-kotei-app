@@ -248,6 +248,37 @@ body {
 .btn-small.primary { background: #1f4e79; color: #fff; font-weight: bold; }
 .btn-small.danger { border-color: #b00020; color: #b00020; }
 
+/* 現場名とGoogleカレンダーの同期の帯 */
+.site-panel {
+  border-top: 2px solid #1f4e79;
+  padding: 6px 8px;
+}
+.site-panel.hidden { display: none; }
+.site-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.site-field { display: flex; align-items: center; gap: 6px; flex: 1 1 200px; min-width: 0; }
+.site-label { font-weight: bold; color: #1f4e79; white-space: nowrap; font-size: 14px; }
+.site-field input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 16px;             /* iPhone で入力時に画面が拡大されないよう16px */
+  min-height: 36px;
+  padding: 4px 8px;
+  border: 1px solid #9aa7b4;
+  border-radius: 8px;
+  background: #fff;
+  color: #222;
+}
+.btn-small:disabled { opacity: 0.5; cursor: default; }
+.gcal-status { margin-top: 4px; font-size: 12px; color: #555; line-height: 1.4; }
+.gcal-result { font-size: 13px; line-height: 1.5; white-space: pre-line; color: #1b5e20; }
+.gcal-result:empty { display: none; }
+.gcal-result.error { color: #b00020; font-weight: bold; }
+.gcal-result.busy { color: #1f4e79; }
+.gcal-help { font-size: 13px; color: #333; margin: 0 0 8px; line-height: 1.6; }
+.gcal-help summary { cursor: pointer; color: #1f4e79; font-weight: bold; }
+.gcal-help ol { margin: 6px 0; padding-left: 1.4em; }
+.sheet-error.info { color: #1f4e79; }
+
 /* 読み取り結果の帯 */
 .read-panel {
   border-top: 2px solid #4fc3f7;
