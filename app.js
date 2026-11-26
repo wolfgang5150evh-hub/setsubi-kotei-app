@@ -8,6 +8,7 @@
 //   ・バーの編集（作業内容・開始日・終了日・下請け業者）の画面
 //   ・業者マスタ（登録・編集・削除、業者ごとの色）。バーは業者の色で表示
 //   ・設備工程の端末内への保存と、同じPDFを開いたときの復元（store.js）
+//   ・バーの始まり端・終わり端の形（無し／●／○／←／→）を選べる
 // PDFの描画には PDF.js（CDN）を使う。元のPDF画像は書き換えず、表示上の並べ替えだけで行を差し込む。
 import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs";
 import { analyzePage } from "./reader.js";
@@ -26,6 +27,10 @@ const RERENDER_DELAY = 250;     // 操作が止まってから描き直すまで
 const EQUIP_LABEL = "設備工事";  // 差し込んだ行の項目名
 const EQUIP_ROW_RATIO = 1.0;    // 差し込む行の高さ＝元の行の高さ（中央値）× この値
 const DEFAULT_BAR_DAYS = 3;     // 「ここにバーを置く」で置くバーの長さ（日）
+const DEFAULT_BAR_CAP = "none"; // 新しく置くバーの端の形（始まり端・終わり端とも。store.BAR_CAPS の値）
+// 両端とも「無し」のバーを、端の形を選べるようにする前の見た目（始まりの縦線＋終わりの矢印）で描くか。
+// false＝「無し」は文字どおり何も付けない（ただの線）。確認事項の回答しだいで true に切り替える。
+const CAP_LEGACY_WHEN_NONE = false;
 const HIT_PX = 28;              // バーの端をつかめる幅（画面px。拡大率によらずこの大きさ）
 const TAP_SLOP = 8;             // これ以上指が動いたら「タップ」ではなく「移動」とみなす（px）
 const TAP_TIME = 600;           // これより長く押したら「タップ」とみなさない（ms）
@@ -61,6 +66,8 @@ const barEndEl = document.getElementById("bar-end");
 const barStartSel = document.getElementById("bar-start-sel");
 const barEndSel = document.getElementById("bar-end-sel");
 const barDaysEl = document.getElementById("bar-days");
+const barStartCapEl = document.getElementById("bar-start-cap");
+const barEndCapEl = document.getElementById("bar-end-cap");
 const barVendorEl = document.getElementById("bar-vendor");
 const barErrEl = document.getElementById("bar-error");
 const vendorSheetEl = document.getElementById("vendor-sheet");
@@ -781,9 +788,10 @@ function updateDock() {
 // 設備の行の差し込み＋バーの配置
 // ======================================================================
 // データ（変更のたびに端末へ保存。保存の形は store.js の説明を参照）：
-//   p.equip：Map（元の行の番号 0始まり → { rowIndex, bars: [{ id, start, end, task, vendorId }], keep }）
+//   p.equip：Map（元の行の番号 0始まり → { rowIndex, bars: [{ id, start, end, task, vendorId, startCap, endCap }], keep }）
 //   start・end：日付の列の番号（0始まり、両端を含む）。1列＝1日。保存するときは日付（YYYY-MM-DD）に直す。
 //   task：作業内容（文字）。vendorId：業者のid（未設定は null）。
+//   startCap・endCap：始まり端・終わり端の形（"none"｜"dot"｜"ring"｜"left"｜"right"。store.BAR_CAPS）。
 //   keep：保存分のうち、この工程表の日付の範囲に入らず表示できなかったバー（消さずに保存し直す）。
 // 選択：selection = null
 //   | { kind: "row",   p, rowIndex }            元の行
@@ -890,7 +898,11 @@ function equipReport() {
       lines.push(`  ・${rowFullName(p, c.rowIndex)}／${EQUIP_LABEL}：バー${bars.length}本`);
       for (const b of bars) {
         const v = vendorById(b.vendorId);
-        lines.push(`      ${barRangeText(p, b, false)}　${b.task ? `「${b.task}」` : "（作業内容なし）"}　${v ? v.name : "業者未設定"}`);
+        const sc = store.normCap(b.startCap);
+        const ec = store.normCap(b.endCap);
+        const capLabel = (k) => store.BAR_CAPS.find((c) => c.value === k).label;
+        const caps = sc === "none" && ec === "none" ? "" : `　端：${capLabel(sc)}／${capLabel(ec)}`;
+        lines.push(`      ${barRangeText(p, b, false)}　${b.task ? `「${b.task}」` : "（作業内容なし）"}　${v ? v.name : "業者未設定"}${caps}`);
       }
       if (ins.keep && ins.keep.length) lines.push(`      ほかに日付の範囲外のバー ${ins.keep.length}本（保存のみ）`);
     }
@@ -1052,8 +1064,9 @@ function createBarEls(p, parent, rowIndex, bar) {
   const els = {
     sel: svgEl("rect", { class: "eq-bar-sel", display: "none" }, g),
     line: svgEl("line", { class: "eq-bar-line" }, g),
-    tick: svgEl("line", { class: "eq-bar-line" }, g),
-    head: svgEl("polygon", { class: "eq-bar-head" }, g),
+    // 端の形（始まり端・終わり端）：矢印・縦線は polygon、丸は circle。使わないほうは隠す
+    capS: { poly: svgEl("polygon", { class: "eq-bar-head" }, g), circ: svgEl("circle", { class: "eq-bar-cap" }, g) },
+    capE: { poly: svgEl("polygon", { class: "eq-bar-head" }, g), circ: svgEl("circle", { class: "eq-bar-cap" }, g) },
     label: svgEl("text", { class: "eq-bar-label" }, g),
     hL: svgEl("circle", { class: "eq-handle", display: "none" }, g),
     hR: svgEl("circle", { class: "eq-handle", display: "none" }, g),
@@ -1102,8 +1115,55 @@ function refreshBarHits() {
   for (const p of pages) updateAllBars(p);
 }
 
-// バーの見た目：完成イメージの工程の線に合わせ、「始まりの縦の短い線＋横線＋終わりの矢印」、
-// 線の上に日付（第2段階で作業内容を出す場所）。
+// 端の形1つ分の形を決める。
+//   kind：store.BAR_CAPS の値（＋前の見た目用の "tick"＝縦の短い線）
+//   edge：バーの端の x（pt）。dir：バーの内側へ向かう向き（始まり端 +1／終わり端 -1）
+//   形はすべてバーの日付の範囲（edge から内側）に収める（隣の日のマスにはみ出さない）
+// 戻り値：{ lineX（横線をどこで止めるか）, poly（polygon の points。無ければ null）, circ（{ cx, r, ring }。無ければ null）}
+function capGeom(kind, edge, dir, ly, a, r, sw) {
+  if (kind === "dot" || kind === "ring") {
+    const cx = edge + dir * r;
+    // 塗りの丸は中心まで線を引く（丸で隠れる）。白抜きの丸は丸の内側に線が見えないよう、丸の手前で止める
+    return { lineX: kind === "dot" ? cx : cx + dir * r, poly: null, circ: { cx, r, ring: kind === "ring" } };
+  }
+  if (kind === "left" || kind === "right") {
+    const arrow = kind === "left" ? -1 : 1;   // 矢印の向き（記号どおり）
+    const outward = arrow === -dir;            // バーの外向きか
+    const tipX = outward ? edge : edge + dir * a;
+    const baseX = outward ? edge + dir * a : edge;
+    const h = a * 0.55;
+    return {
+      // 外向き：線は矢印の根元の少し先まで（すき間が出ないように）。内向き：線は端まで通し、矢印を上に重ねる
+      lineX: outward ? edge + dir * a * 0.8 : edge,
+      poly: `${tipX},${ly} ${baseX},${ly - h} ${baseX},${ly + h}`,
+      circ: null,
+    };
+  }
+  if (kind === "tick") {
+    const hx = sw / 2;
+    const x = edge + dir * hx;
+    const t = a * 0.6;
+    return { lineX: edge, poly: `${x - hx},${ly - t} ${x + hx},${ly - t} ${x + hx},${ly + t} ${x - hx},${ly + t}`, circ: null };
+  }
+  return { lineX: edge, poly: null, circ: null }; // 無し
+}
+
+function applyCap(capEls, geom, color, sw, ly) {
+  showEl(capEls.poly, !!geom.poly);
+  if (geom.poly) {
+    setA(capEls.poly, { points: geom.poly });
+    capEls.poly.style.fill = color;
+  }
+  showEl(capEls.circ, !!geom.circ);
+  if (geom.circ) {
+    const ring = geom.circ.ring;
+    setA(capEls.circ, { cx: geom.circ.cx, cy: ly, r: ring ? Math.max(0.2, geom.circ.r - sw * 0.4) : geom.circ.r, "stroke-width": ring ? sw * 0.8 : 0 });
+    capEls.circ.style.fill = ring ? "#ffffff" : color;
+    capEls.circ.style.stroke = ring ? color : "none";
+  }
+}
+
+// バーの見た目：横線＋両端の形（無し／●／○／←／→。バーごとに選べる）、線の上に作業内容（無ければ日付）。
 function positionBar(p, cut, bar, els, lane, laneCount) {
   const cols = p.result.dates.columns;
   const x0 = cols[bar.start].x0;
@@ -1113,19 +1173,26 @@ function positionBar(p, cut, bar, els, lane, laneCount) {
   const top = cut.dTop + lane * laneH;
   const ly = top + laneH * 0.66;
   const sw = Math.max(0.5, Math.min(1.3, laneH * 0.14));
-  const a = Math.max(0.6, Math.min(laneH * 0.32, 2.8, w * 0.45));
+  const a = Math.max(0.6, Math.min(laneH * 0.32, 2.8, w * 0.45));   // 矢印の長さ
+  const cr = Math.max(0.5, Math.min(Math.max(sw * 1.6, a * 0.5), w * 0.22)); // 丸の半径（線の太さの約1.6倍。短いバーでは小さく）
   const fs = Math.max(2.2, Math.min(4.2, laneH * 0.38));
-  setA(els.line, { x1: x0 + 0.4, y1: ly, x2: x1 - a * 0.8, y2: ly, "stroke-width": sw });
-  setA(els.tick, { x1: x0 + 0.4, y1: ly - a * 0.6, x2: x0 + 0.4, y2: ly + a * 0.6, "stroke-width": sw });
-  setA(els.head, { points: `${x1},${ly} ${x1 - a},${ly - a * 0.55} ${x1 - a},${ly + a * 0.55}` });
+  // 端の形（保存データに無い・知らない値は「無し」）
+  let sk = store.normCap(bar.startCap);
+  let ek = store.normCap(bar.endCap);
+  if (CAP_LEGACY_WHEN_NONE && sk === "none" && ek === "none") { sk = "tick"; ek = "right"; }
+  const L = x0 + 0.4;
+  const R = x1 - 0.4;
+  const gs = capGeom(sk, L, 1, ly, a, cr, sw);
+  const ge = capGeom(ek, R, -1, ly, a, cr, sw);
+  setA(els.line, { x1: gs.lineX, y1: ly, x2: Math.max(gs.lineX, ge.lineX), y2: ly, "stroke-width": sw });
   setA(els.label, { x: x0 + 1, y: ly - sw / 2 - fs * 0.3, "font-size": fs });
-  // 業者の色で表示（未設定は灰色の破線）。線の上には作業内容（無ければ日付）
+  // 業者の色で表示（未設定は灰色の破線）。端の形も同じ色
   const v = vendorById(bar.vendorId);
   const color = v ? v.color : UNSET_COLOR;
   els.line.style.stroke = color;
   els.line.style.strokeDasharray = v ? "" : `${r1(sw * 2.5)} ${r1(sw * 1.5)}`;
-  els.tick.style.stroke = color;
-  els.head.style.fill = color;
+  applyCap(els.capS, gs, color, sw, ly);
+  applyCap(els.capE, ge, color, sw, ly);
   els.label.style.fill = color;
   els.label.textContent = bar.task ? bar.task : barShortLabel(cols, bar);
   setA(els.sel, { x: x0 - 0.5, y: top + 0.3, width: w + 1, height: Math.max(0.5, laneH - 0.6) });
@@ -1344,6 +1411,7 @@ function addBar(p, i, col) {
   const bar = {
     id: ++barSeq, start, end: Math.min(n - 1, start + DEFAULT_BAR_DAYS - 1),
     task: "", vendorId: vendorById(lastVendorId) ? lastVendorId : null,
+    startCap: DEFAULT_BAR_CAP, endCap: DEFAULT_BAR_CAP,
   };
   ins.bars.push(bar);
   drawEquip(p);
@@ -1524,7 +1592,11 @@ function restoreSaved() {
       const s = dateToCol(cols, b.start, b.startCol);
       const e = dateToCol(cols, b.end, b.endCol);
       if (s === null || e === null || e < s) { ins.keep.push(b); kept++; continue; }
-      ins.bars.push({ id: ++barSeq, start: s, end: e, task: b.task || "", vendorId: b.vendorId || null });
+      // 端の形が無い古い保存データは「無し」として読む
+      ins.bars.push({
+        id: ++barSeq, start: s, end: e, task: b.task || "", vendorId: b.vendorId || null,
+        startCap: store.normCap(b.startCap), endCap: store.normCap(b.endCap),
+      });
       nBars++;
     }
     t.p.equip.set(t.i, ins);
@@ -1553,6 +1625,7 @@ function serializeRows() {
         .map((b) => ({
           task: b.task || "", vendorId: b.vendorId || null,
           start: colISO(cols[b.start]), end: colISO(cols[b.end]), startCol: b.start, endCol: b.end,
+          startCap: store.normCap(b.startCap), endCap: store.normCap(b.endCap),
         }));
       out.push({
         key: p.rowKeys[c.rowIndex], group: row.group || "", name: row.name || "", page: p.no, rowNo: row.no,
@@ -1653,10 +1726,22 @@ function openBarSheet(p, rowIndex, barId, isNew) {
       sel.value = String(v);
     }
   }
+  barStartCapEl.value = store.normCap(bar.startCap);
+  barEndCapEl.value = store.normCap(bar.endCap);
   fillVendorSelect(bar.vendorId);
   barErrEl.textContent = "";
   updateBarDays();
   showSheet(barSheetEl);
+}
+
+// 端の形の選択肢（始まり端・終わり端とも同じ5つ）
+for (const sel of [barStartCapEl, barEndCapEl]) {
+  for (const c of store.BAR_CAPS) {
+    const o = document.createElement("option");
+    o.value = c.value;
+    o.textContent = c.label;
+    sel.appendChild(o);
+  }
 }
 
 function fillVendorSelect(selectedId) {
@@ -1732,6 +1817,8 @@ function commitBarSheet() {
   bar.start = r.s;
   bar.end = r.e;
   bar.vendorId = barVendorEl.value || null;
+  bar.startCap = store.normCap(barStartCapEl.value);
+  bar.endCap = store.normCap(barEndCapEl.value);
   if (bar.vendorId) lastVendorId = bar.vendorId;
   closeSheets();
   drawEquip(p);
