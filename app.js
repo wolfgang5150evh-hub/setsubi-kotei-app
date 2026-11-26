@@ -11,7 +11,8 @@
 //   ・バーの始まり端・終わり端の形（無し／●／○／←／→）を選べる
 // Googleカレンダー連携
 //   ・PDFごとの「現場名」（初期値はファイル名）。保存・復元の対象
-//   ・「カレンダーと同期」で、そのPDFのバー全体を専用カレンダー「設備工程」の終日予定と一致させる（gcal.js）
+//   ・「カレンダーと同期」で、そのPDFのバー全体を専用カレンダー「設備工程」の終日予定と双方向に一致させる（gcal.js）
+//     カレンダー側の変更・削除・新規予定を取り込んでから、アプリ側の内容を送る。競合は「最後に変更した方を優先」
 // PDFの描画には PDF.js（CDN）を使う。元のPDF画像は書き換えず、表示上の並べ替えだけで行を差し込む。
 import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs";
 import { analyzePage } from "./reader.js";
@@ -573,6 +574,9 @@ function resetAnalysis() {
   // 保存・復元
   docInfo = null;
   unplaced = [];
+  calPending = [];
+  pendingAssignUid = null;
+  pendingMsg = "";
   restoreNote = "";
   saveStatus = null;
   syncNote = null;
@@ -812,8 +816,10 @@ function updateDock() {
 // 設備の行の差し込み＋バーの配置
 // ======================================================================
 // データ（変更のたびに端末へ保存。保存の形は store.js の説明を参照）：
-//   p.equip：Map（元の行の番号 0始まり → { rowIndex, bars: [{ id, start, end, task, vendorId, startCap, endCap, uid, gcalId }], keep }）
+//   p.equip：Map（元の行の番号 0始まり → { rowIndex, bars: [{ id, start, end, task, vendorId, startCap, endCap, uid, gcalId, updatedAt, gcalUpdated, lastSyncSnapshot }], keep }）
 //   uid：保存しても変わらないバーのid（カレンダーの予定の目印）。gcalId：対応するGoogleカレンダーの予定ID（未同期は null）。
+//   updatedAt：ローカル最終変更時刻（ミリ秒。保存時はISO文字列）。gcalUpdated：前回同期時に見た予定の updated。
+//   lastSyncSnapshot：前回同期時点の { task, vendorId, start, end }（日付はISO文字列）。双方向同期の変更判定に使う。
 //   start・end：日付の列の番号（0始まり、両端を含む）。1列＝1日。保存するときは日付（YYYY-MM-DD）に直す。
 //   task：作業内容（文字）。vendorId：業者のid（未設定は null）。
 //   startCap・endCap：始まり端・終わり端の形（"none"｜"dot"｜"ring"｜"left"｜"right"。store.BAR_CAPS）。
@@ -831,6 +837,9 @@ let barSeq = 0;
 // 保存・復元
 let docInfo = null;      // 開いているPDF：{ id（中身のハッシュ）, sig（中身の目印）, replaceId, fileName, fileSize, numPages, range }
 let unplaced = [];       // 保存分のうち、行が見つからず表示できなかった設備の行（消さずに保存し直す）
+let calPending = [];     // カレンダーから取り込んだが配置先の行が決まらなかったバー（保存形のまま保持。帯の一覧から割り当てる）
+let pendingAssignUid = null; // 未配置バーの割り当て先の行を選んでいる最中のバーの uid
+let pendingMsg = "";     // 未配置バーの割り当てに関するお知らせ（下の帯に出す）
 let restoreNote = "";    // 復元したときのお知らせ（下の帯に出す）
 let saveStatus = null;   // null（まだ保存していない）| { ok: true, at: Date } | { ok: false, msg }
 
@@ -1374,7 +1383,7 @@ function onBarUp(e) {
   const openEdit = e.type === "pointerup" && !barDrag.moved && barDrag.wasSelected;
   barDrag = null;
   hideTip();
-  if (changed) equipChanged();
+  if (changed) { bar.updatedAt = Date.now(); equipChanged(); }
   updateEquipPanel();
   if (openEdit) openBarSheet(p, rowIndex, bar.id, false);
 }
@@ -1438,6 +1447,7 @@ function addBar(p, i, col) {
     task: "", vendorId: vendorById(lastVendorId) ? lastVendorId : null,
     startCap: DEFAULT_BAR_CAP, endCap: DEFAULT_BAR_CAP,
     uid: store.newId("b"), gcalId: null,
+    updatedAt: Date.now(), gcalUpdated: null, lastSyncSnapshot: null,
   };
   ins.bars.push(bar);
   drawEquip(p);
@@ -1466,6 +1476,43 @@ function findBar(p, i, barId) {
   return ins ? ins.bars.find((b) => b.id === barId) : null;
 }
 
+// ---- 未配置バー（カレンダーから取り込んだが、配置先の行が決まらなかったバー）----
+function pendingLabel(b) {
+  const d = (iso) => (iso ? iso.slice(5).replace("-", "/") : "?");
+  return `${b.task || "（作業内容なし）"}（${d(b.start)}〜${d(b.end)}）`;
+}
+// 未配置バーを、選んだ行の下の設備の行へ割り当てる
+function assignPending(p, rowIndex) {
+  const idx = calPending.findIndex((b) => b.uid === pendingAssignUid);
+  if (idx < 0) { pendingAssignUid = null; updateEquipPanel(); return; }
+  const pb = calPending[idx];
+  const cols = p.result.dates.columns;
+  const s = dateToCol(cols, pb.start, null);
+  const e = dateToCol(cols, pb.end, null);
+  if (s === null || e === null || e < s) {
+    pendingMsg = `「${pendingLabel(pb)}」は、この工程表の日付の範囲外のため割り当てられませんでした。`;
+    pendingAssignUid = null;
+    updateEquipPanel();
+    return;
+  }
+  const isNewRow = !p.equip.has(rowIndex);
+  if (isNewRow) p.equip.set(rowIndex, { rowIndex, bars: [], keep: [] });
+  const bar = {
+    id: ++barSeq, start: s, end: e, task: pb.task || "", vendorId: pb.vendorId || null,
+    startCap: store.normCap(pb.startCap), endCap: store.normCap(pb.endCap),
+    uid: pb.uid || store.newId("b"), gcalId: pb.gcalId || null,
+    updatedAt: pb.updatedAt ? (Date.parse(pb.updatedAt) || Date.now()) : Date.now(),
+    gcalUpdated: pb.gcalUpdated || null, lastSyncSnapshot: pb.lastSyncSnapshot || null,
+  };
+  p.equip.get(rowIndex).bars.push(bar);
+  calPending.splice(idx, 1);
+  pendingAssignUid = null;
+  pendingMsg = `未配置バー「${pendingLabel(pb)}」を「${rowFullName(p, rowIndex)}」の設備の行へ割り当てました。`;
+  if (isNewRow) relayoutEquip(); else drawEquip(p);
+  equipChanged();
+  setSelection({ kind: "bar", p, rowIndex, barId: bar.id });
+}
+
 // ---- 下の帯（設備）----
 function addAction(label, fn, cls = "", aria = "") {
   const b = document.createElement("button");
@@ -1488,6 +1535,19 @@ function updateEquipPanel() {
       equipInfo.textContent = (restoreNote ? restoreNote + "\n" : "")
         + `表の行をタップして選ぶと、その下に「${EQUIP_LABEL}」の行を入れられます。（設備の行 ${rowsN}行・バー ${barsN}本）\n`
         + saveStatusText();
+      if (pendingMsg) equipInfo.textContent += "\n" + pendingMsg;
+      if (calPending.length) {
+        equipInfo.textContent += `\n未配置バー ${calPending.length}本（カレンダーから取り込み）：`
+          + calPending.map((b) => "\n・" + pendingLabel(b)).join("");
+        if (pendingAssignUid) {
+          equipInfo.textContent += "\n割り当て先の行をタップしてください。";
+          addAction("割り当てをやめる", () => { pendingAssignUid = null; updateEquipPanel(); });
+        } else {
+          for (const b of calPending) {
+            addAction(`「${b.task || "（作業内容なし）"}」を割り当てる`, () => { pendingAssignUid = b.uid; pendingMsg = ""; updateEquipPanel(); });
+          }
+        }
+      }
       addAction("業者の登録・編集", () => openVendorSheet(false));
     } else {
       const p = s.p;
@@ -1500,12 +1560,14 @@ function updateEquipPanel() {
         } else {
           addAction("この下に設備の行を入れる", () => insertEquipRow(p, s.rowIndex), "primary");
         }
+        if (pendingAssignUid) addAction("未配置バーをこの行へ割り当てる", () => assignPending(p, s.rowIndex), "primary");
       } else if (s.kind === "equip") {
         const ins = p.equip.get(s.rowIndex);
         const cols = p.result.dates.columns;
         equipInfo.textContent = `${base}／${EQUIP_LABEL}　バー${ins ? ins.bars.length : 0}本　`
           + (s.col !== null ? `選んだ日：${colDate(cols[s.col], true)}` : "（日付の欄をタップすると、その日にバーを置けます）");
         if (s.col !== null) addAction("ここにバーを置く", () => addBar(p, s.rowIndex, s.col), "primary");
+        if (pendingAssignUid) addAction("未配置バーをこの行へ割り当てる", () => assignPending(p, s.rowIndex), "primary");
         addAction("設備の行を取り消す", () => removeEquipRow(p, s.rowIndex), "danger");
       } else if (s.kind === "bar") {
         const bar = findBar(p, s.rowIndex, s.barId);
@@ -1609,6 +1671,11 @@ function restoreSaved() {
   docInfo.siteName = typeof rec.siteName === "string" && rec.siteName.trim() ? rec.siteName.trim() : null;
   docInfo.syncKey = typeof rec.syncKey === "string" && rec.syncKey ? rec.syncKey : null;
   docInfo.lastSyncAt = Number.isFinite(rec.lastSyncAt) ? rec.lastSyncAt : null;
+  // カレンダーから取り込んだ未配置バー（この項目が無い古い保存データでは空）
+  calPending = (Array.isArray(rec.pendingBars) ? rec.pendingBars : [])
+    .filter((b) => b && typeof b === "object" && (b.gcalId || b.uid));
+  pendingAssignUid = null;
+  pendingMsg = "";
   unplaced = [];
   let nRows = 0;
   let nBars = 0;
@@ -1629,6 +1696,12 @@ function restoreSaved() {
         // カレンダー同期用（この項目が無い古い保存データには新しく id を付ける。次の保存で書き込まれる）
         uid: typeof b.uid === "string" && b.uid ? b.uid : store.newId("b"),
         gcalId: typeof b.gcalId === "string" && b.gcalId ? b.gcalId : null,
+        // 双方向同期用（無い古い保存データは「前回同期後の変更なし」として扱う）
+        updatedAt: b.updatedAt ? (Date.parse(b.updatedAt) || null) : null,
+        gcalUpdated: typeof b.gcalUpdated === "string" && b.gcalUpdated ? b.gcalUpdated : null,
+        lastSyncSnapshot: (b.lastSyncSnapshot && typeof b.lastSyncSnapshot === "object")
+          ? { task: b.lastSyncSnapshot.task || "", vendorId: b.lastSyncSnapshot.vendorId || null, start: b.lastSyncSnapshot.start || null, end: b.lastSyncSnapshot.end || null }
+          : null,
       });
       nBars++;
     }
@@ -1640,6 +1713,7 @@ function restoreSaved() {
     // 現場名だけの保存分（設備の行は無い）
   } else if (found.how === "file") notes.push(`前回保存した設備の行 ${nRows}行・バー ${nBars}本を復元しました。`);
   else notes.push(`同じ内容のPDF（${rec.fileName || "名前不明"}）で保存した設備の行 ${nRows}行・バー ${nBars}本を復元しました。`);
+  if (calPending.length) notes.push(`※ カレンダーから取り込んだ未配置のバーが ${calPending.length}本あります（下の帯の一覧から割り当てられます）。`);
   if (unplaced.length) notes.push(`※ 行が見つからない設備の行が ${unplaced.length}行あり、表示していません（保存データには残しています）。`);
   if (kept) notes.push(`※ 工程表の日付の範囲外のバーが ${kept}本あり、表示していません（保存データには残しています）。`);
   restoreNote = notes.join("\n");
@@ -1662,6 +1736,9 @@ function serializeRows() {
           start: colISO(cols[b.start]), end: colISO(cols[b.end]), startCol: b.start, endCol: b.end,
           startCap: store.normCap(b.startCap), endCap: store.normCap(b.endCap),
           uid: b.uid || null, gcalId: b.gcalId || null,
+          updatedAt: b.updatedAt ? new Date(b.updatedAt).toISOString() : null,
+          gcalUpdated: b.gcalUpdated || null,
+          lastSyncSnapshot: b.lastSyncSnapshot || null,
         }));
       out.push({
         key: p.rowKeys[c.rowIndex], group: row.group || "", name: row.name || "", page: p.no, rowNo: row.no,
@@ -1678,11 +1755,12 @@ function saveDoc() {
     const rows = serializeRows();
     // 現場名を付けた・カレンダーと同期したPDFは、設備の行が無くても記録を残す
     // （同期の目印を消すと、カレンダーに作った予定をあとで消せなくなるため）
-    if (rows.length || docInfo.siteName || docInfo.syncKey) {
+    if (rows.length || docInfo.siteName || docInfo.syncKey || calPending.length) {
       store.putDoc({
         id: docInfo.id, sig: docInfo.sig, fileName: docInfo.fileName, fileSize: docInfo.fileSize,
         numPages: docInfo.numPages, range: docInfo.range, rows,
         siteName: docInfo.siteName || null, syncKey: docInfo.syncKey || null, lastSyncAt: docInfo.lastSyncAt || null,
+        pendingBars: calPending,
       }, docInfo.replaceId);
     } else {
       // 設備の行がすべて無くなったら、このPDFの記録ごと消す
@@ -1857,6 +1935,7 @@ function commitBarSheet() {
   bar.vendorId = barVendorEl.value || null;
   bar.startCap = store.normCap(barStartCapEl.value);
   bar.endCap = store.normCap(barEndCapEl.value);
+  bar.updatedAt = Date.now();
   if (bar.vendorId) lastVendorId = bar.vendorId;
   closeSheets();
   drawEquip(p);
@@ -2051,13 +2130,23 @@ vendorNameEl.addEventListener("keydown", (e) => {
 // 現場名とGoogleカレンダー連携
 // ======================================================================
 // ・現場名：PDF（保存ドキュメント）ごと。初期値はファイル名（拡張子なし）。変えたら保存する。
-// ・「カレンダーと同期」：そのPDFのバー全体を、専用カレンダー「設備工程」の終日予定と一致させる。
+// ・「カレンダーと同期」：そのPDFのバー全体を、専用カレンダー「設備工程」の終日予定と双方向に一致させる。
 //   1. 専用カレンダーを用意（無ければ作る）
-//   2. このPDFの目印（syncKey）が付いた予定を全部読む
-//   3. バーごとに：対応する予定（gcalId、無ければバーの uid の目印）があれば、内容が違うときだけ更新。無ければ作成
-//   4. 3がすべて成功したときだけ、どのバーにも対応しない予定を削除
+//   2. 先にカレンダー→アプリを取り込む（pull）：
+//      ・目印付き予定について、前回同期時のスナップショット／gcalUpdated と予定の updated を比べ、
+//        カレンダー側だけが変わっていればバーを更新。両方が変わっていれば「最後に変更した方を優先」
+//        （バーの updatedAt と予定の updated を比較し、新しい方を勝たせる）。
+//      ・カレンダー側で削除された予定は、バーがローカル変更されていなければバーを削除し、
+//        変更されていれば削除を取り消して手順3で予定を作り直す。
+//      ・カレンダー側の新規予定（目印付きで未知の uid、または目印なしで場所が現場名と一致するもの）を
+//        新規バーとして取り込む。説明欄の「項目：」で配置先の行を特定し、無ければ設備行を自動で差し込む。
+//        特定できなければ「未配置バー」として保存し、帯の一覧から割り当て直せるようにする。
+//   3. 次にアプリ→カレンダー（push）：バーごとに、対応する予定があれば内容が違うときだけ更新、無ければ作成。
+//   4. 3がすべて成功したときだけ、どのバーにも対応しない目印付き予定を削除する。
 //   途中でエラー（期限切れ・通信失敗など）になったら、そこで止める。作った予定のIDはその都度バーに記録するので、
 //   もう一度同期しても二重にはならない。削除は最後にしか行わないので、途中で止まって予定が消えることはない。
+//   ※ 現場名（location）はアプリ側を正とし、取り込みでは書き換えない（違いは push でアプリ側に戻す）。
+//   ※ バーの端の形などカレンダーに無い情報は、取り込み更新時もローカルの値を保持する。
 let syncing = false;
 let syncNote = null; // null | { kind: "ok" | "error" | "busy", text }
 
@@ -2144,7 +2233,7 @@ function eventDescription(p, rowIndex, bar, site) {
     `作業内容：${bar.task || "（未入力）"}`,
     `現場：${site}`,
     "",
-    "※ 設備工程管理アプリから同期した予定です。変更はアプリで行ってください（次の同期でアプリの内容に戻ります）。",
+    "※ 設備工程管理アプリと同期した予定です。カレンダー側で変更・削除すると、次の同期でアプリに取り込まれます。",
   ].join("\n");
 }
 
@@ -2187,11 +2276,124 @@ btnGcalSync.addEventListener("click", () => {
   });
 });
 
+// ---- 双方向同期の補助 ----
+// バーの「前回同期時点」の姿（保存形：日付はISO文字列）
+function barSnapshotOf(bar, cols) {
+  return { task: bar.task || "", vendorId: bar.vendorId || null, start: colISO(cols[bar.start]), end: colISO(cols[bar.end]) };
+}
+function snapEq(a, b) {
+  return !!a && !!b && (a.task || "") === (b.task || "") && (a.vendorId || null) === (b.vendorId || null)
+    && a.start === b.start && a.end === b.end;
+}
+// ローカル側が前回同期後に変わったか（スナップショットが無い古い保存データは「変更なし」として扱う）
+function barLocallyChanged(bar, cols) {
+  if (!bar.lastSyncSnapshot) return false;
+  return !snapEq(bar.lastSyncSnapshot, barSnapshotOf(bar, cols));
+}
+// タイトル「作業内容（業者名）」の解析。末尾の括弧内は業者名として分離する
+function parseEventTitle(summary) {
+  const s = (summary || "").trim();
+  const m = s.match(/[（(]([^（）()]*)[）)]\s*$/);
+  if (m && m[1].trim()) {
+    return { task: s.slice(0, m.index).trim(), vendorName: m[1].trim() };
+  }
+  return { task: s, vendorName: null };
+}
+// 業者名から業者を引く。無ければ自動登録する（未使用の色から割り当てる）
+function ensureVendorByName(name) {
+  const found = vendors.find((v) => v.name === name);
+  if (found) return found;
+  const free = store.VENDOR_COLORS.find((c) => !vendors.some((v) => v.color === c.color));
+  const v = { id: store.newId("v"), name, color: (free || store.VENDOR_COLORS[vendors.length % store.VENDOR_COLORS.length]).color };
+  vendors = [...vendors, v];
+  try { store.saveVendors(vendors); } catch (err) { console.warn("業者の自動登録を保存できませんでした", err); }
+  return v;
+}
+// 予定の日付範囲（両端を含むISO文字列）。終日予定は end が翌日指定なので1日戻す
+function tokyoDateOf(dt) {
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(dt);
+    const g = (t) => (parts.find((x) => x.type === t) || {}).value || "";
+    return `${g("year")}-${g("month")}-${g("day")}`;
+  } catch { return dt.toISOString().slice(0, 10); }
+}
+function eventDateRange(ev) {
+  if (!ev || !ev.start) return null;
+  let start = null;
+  let end = null;
+  if (ev.start.date) {
+    start = ev.start.date;
+    end = ev.end && ev.end.date ? gcal.prevDay(ev.end.date) : start;
+  } else if (ev.start.dateTime) {
+    const sd = new Date(ev.start.dateTime);
+    if (Number.isNaN(sd.getTime())) return null;
+    start = tokyoDateOf(sd);
+    if (ev.end && ev.end.dateTime) {
+      const ed = new Date(ev.end.dateTime);
+      end = tokyoDateOf(ed);
+      // 終了が東京時間でちょうど0時のときは、その前日までが期間
+      const tp = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Tokyo", hour: "2-digit", minute: "2-digit", hour12: false }).format(ed);
+      if (tp === "00:00" || tp === "24:00") end = gcal.prevDay(end);
+    } else end = start;
+  }
+  if (!start || !end || end < start) return null;
+  return { start, end };
+}
+// 説明欄の「項目：…」から配置先の行の呼び名を取り出す（末尾の「／設備工事」を外す）
+function eventRowKey(ev) {
+  const desc = (ev && ev.description) || "";
+  for (const line of desc.split("\n")) {
+    const t = line.trim();
+    if (t.startsWith("項目：") || t.startsWith("項目:")) {
+      let v = t.slice(3).trim();
+      if (v.endsWith(`／${EQUIP_LABEL}`)) v = v.slice(0, -(`／${EQUIP_LABEL}`).length);
+      v = v.replace(/^\d+ページ目\s+/, ""); // 複数ページのとき rowFullName に付く前置き
+      return v || null;
+    }
+  }
+  return null;
+}
+function findRowByDescKey(key) {
+  if (!key) return null;
+  for (const p of pages) {
+    if (!p.rowKeys) continue;
+    for (let i = 0; i < p.rowKeys.length; i++) {
+      if (p.rowKeys[i] === key || p.rowKeys[i].startsWith(key + "#")) return { p, i };
+    }
+  }
+  return null;
+}
+// カレンダーの予定の内容をバーに取り込む（端の形などカレンダーに無い情報は保持する）
+function applyEventToBar(bar, p, ev) {
+  const cols = p.result.dates.columns;
+  const range = eventDateRange(ev);
+  const { task, vendorName } = parseEventTitle(ev.summary);
+  bar.task = task;
+  bar.vendorId = vendorName ? ensureVendorByName(vendorName).id : null;
+  let datesApplied = !range;
+  if (range) {
+    const s = dateToCol(cols, range.start, null);
+    const e = dateToCol(cols, range.end, null);
+    if (s !== null && e !== null && e >= s) { bar.start = s; bar.end = e; datesApplied = true; }
+    // 工程表の範囲外の日付は取り込まない（タイトル・業者だけ取り込み、日付は push でアプリ側に戻る。仮決め：進捗メモ参照）
+  }
+  bar.updatedAt = (ev.updated && Date.parse(ev.updated)) || Date.now();
+  if (datesApplied) {
+    // 取り込んだ内容を「同期済み」として記録し、続く push で無駄に更新し直さない
+    bar.gcalUpdated = ev.updated || null;
+    bar.lastSyncSnapshot = barSnapshotOf(bar, cols);
+  }
+}
+
 async function runSync() {
   const doc = docInfo;
   if (!doc || !doc.sig || syncing) return;
   syncing = true;
-  const n = { created: 0, updated: 0, deleted: 0, same: 0 };
+  // pull：カレンダーから／push：カレンダーへ
+  const n = {
+    pullAdd: 0, pullUpd: 0, pullDel: 0,
+    created: 0, updated: 0, deleted: 0, same: 0, conflicts: 0,
+  };
   const checkDoc = () => {
     if (docInfo !== doc) throw new gcal.GcalError("abort", "別のPDFを開いたため、同期を途中で止めました。");
   };
@@ -2206,9 +2408,148 @@ async function runSync() {
       if (!saveStatus || !saveStatus.ok) throw new gcal.GcalError("save", "端末に保存できないため、同期を止めました。");
     }
     const site = siteNameOf();
-    // 作りたい予定の一覧（表示しているバー全部）
+
+    const cal = await gcal.ensureCalendar();
+    calCreated = cal.created;
+    checkDoc();
+    const tagged = await gcal.listDocEvents(cal.id, doc.syncKey);
+    checkDoc();
+    const allEvents = await gcal.listAllEvents(cal.id);
+    checkDoc();
+    const taggedById = new Map(tagged.map((ev) => [ev.id, ev]));
+    const allById = new Map(allEvents.map((ev) => [ev.id, ev]));
+    const taggedByUid = new Map();
+    for (const ev of tagged) {
+      const u = gcal.eventBarUid(ev);
+      if (u && !taggedByUid.has(u)) taggedByUid.set(u, ev);
+    }
+    const findEvForBar = (bar) => (bar.gcalId && (taggedById.get(bar.gcalId) || allById.get(bar.gcalId)))
+      || taggedByUid.get(bar.uid) || null;
+
+    // ===== 手順2：カレンダー→アプリ（pull）=====
+    // 既知の uid・予定ID（表示中バー＋表示していない保存分＋未配置バー）
+    const knownUids = new Set();
+    const knownEvIds = new Set();
+    const collectKnown = (b) => { if (!b) return; if (b.uid) knownUids.add(b.uid); if (b.gcalId) knownEvIds.add(b.gcalId); };
+    for (const p of pages) for (const ins of p.equip.values()) { ins.bars.forEach(collectKnown); (ins.keep || []).forEach(collectKnown); }
+    for (const r of unplaced) (r.bars || []).forEach(collectKnown);
+    calPending.forEach(collectKnown);
+
+    // 2a・2b：既存バーの更新と、カレンダー側削除の反映
+    for (const p of pages) {
+      if (!p.result || !p.result.dates) continue;
+      const cols = p.result.dates.columns;
+      for (const ins of [...p.equip.values()]) {
+        const keptBars = [];
+        for (const bar of ins.bars) {
+          if (!bar.uid) bar.uid = store.newId("b");
+          const ev = findEvForBar(bar);
+          const wasSynced = !!(bar.gcalId || bar.gcalUpdated || bar.lastSyncSnapshot);
+          if (!ev) {
+            if (wasSynced && bar.gcalId && !allById.has(bar.gcalId)) {
+              // 2b：カレンダー側で削除された
+              if (barLocallyChanged(bar, cols)) {
+                bar.gcalId = null; // 削除を取り消し、手順3で作り直す
+                bar.gcalUpdated = null;
+                bar.lastSyncSnapshot = null;
+                keptBars.push(bar);
+              } else {
+                n.pullDel++; // バーも削除する
+              }
+              continue;
+            }
+            keptBars.push(bar);
+            continue;
+          }
+          // カレンダー側が変わったか
+          let calChanged;
+          if (bar.gcalUpdated) calChanged = ev.updated !== bar.gcalUpdated;
+          else if (bar.lastSyncSnapshot) {
+            const r = eventDateRange(ev);
+            const { task, vendorName } = parseEventTitle(ev.summary);
+            const evSnap = { task, vendorId: vendorName ? (vendors.find((v) => v.name === vendorName) || {}).id || null : null, start: r && r.start, end: r && r.end };
+            calChanged = !snapEq(bar.lastSyncSnapshot, evSnap);
+          } else calChanged = false; // 古い保存データ：変更なしとして扱う
+          const localChanged = barLocallyChanged(bar, cols);
+          if (calChanged && !localChanged) {
+            applyEventToBar(bar, p, ev);
+            n.pullUpd++;
+          } else if (calChanged && localChanged) {
+            n.conflicts++;
+            const evTime = (ev.updated && Date.parse(ev.updated)) || 0;
+            if (!(bar.updatedAt && bar.updatedAt > evTime)) {
+              applyEventToBar(bar, p, ev); // カレンダーの方が新しい（同点もカレンダー優先）
+              n.pullUpd++;
+            }
+            // ローカルの方が新しければバーをそのままにし、手順3でカレンダーへ上書きする
+          }
+          keptBars.push(bar);
+        }
+        ins.bars = keptBars;
+      }
+    }
+
+    // 2c：カレンダー側の新規予定の取り込み
+    const importEvent = (ev) => {
+      if (calPending.some((b) => b.gcalId === ev.id)) return;
+      const range = eventDateRange(ev);
+      if (!range) return;
+      const { task, vendorName } = parseEventTitle(ev.summary);
+      const vendorId = vendorName ? ensureVendorByName(vendorName).id : null;
+      const uid = gcal.eventBarUid(ev) || store.newId("b");
+      const snapshot = { task, vendorId, start: range.start, end: range.end };
+      const target = findRowByDescKey(eventRowKey(ev));
+      let placed = false;
+      if (target) {
+        const cols = target.p.result.dates.columns;
+        const s = dateToCol(cols, range.start, null);
+        const e = dateToCol(cols, range.end, null);
+        if (s !== null && e !== null && e >= s) {
+          if (!target.p.equip.has(target.i)) target.p.equip.set(target.i, { rowIndex: target.i, bars: [], keep: [] });
+          target.p.equip.get(target.i).bars.push({
+            id: ++barSeq, start: s, end: e, task, vendorId,
+            startCap: DEFAULT_BAR_CAP, endCap: DEFAULT_BAR_CAP,
+            uid, gcalId: ev.id,
+            updatedAt: (ev.updated && Date.parse(ev.updated)) || Date.now(),
+            gcalUpdated: ev.updated || null, lastSyncSnapshot: snapshot,
+          });
+          placed = true;
+        }
+      }
+      if (placed) n.pullAdd++;
+      else {
+        calPending.push({
+          task, vendorId, start: range.start, end: range.end, startCol: null, endCol: null,
+          startCap: DEFAULT_BAR_CAP, endCap: DEFAULT_BAR_CAP,
+          uid, gcalId: ev.id,
+          updatedAt: ev.updated || new Date().toISOString(),
+          gcalUpdated: ev.updated || null, lastSyncSnapshot: snapshot,
+        });
+      }
+    };
+    for (const ev of tagged) {
+      const u = gcal.eventBarUid(ev);
+      if (u && knownUids.has(u)) continue;
+      if (knownEvIds.has(ev.id)) continue;
+      importEvent(ev);
+      if (u) knownUids.add(u);
+      knownEvIds.add(ev.id);
+    }
+    for (const ev of allEvents) {
+      if (gcal.isAppEvent(ev)) continue; // 目印付きは上で処理（ほかのPDFの目印付き予定には触らない）
+      if (knownEvIds.has(ev.id)) continue;
+      if ((ev.location || "") !== site) continue; // 場所が現場名と一致するものだけ
+      importEvent(ev);
+      knownEvIds.add(ev.id);
+    }
+    if (n.pullAdd || n.pullUpd || n.pullDel || calPending.length) {
+      relayoutEquip();
+      saveIfSame();
+    }
+
+    // ===== 手順3：アプリ→カレンダー（push）=====
     const want = [];
-    const keepIds = new Set(); // 消さない予定：表示していない保存分のバー・日付が読めないバーに対応する予定
+    const keepIds = new Set(); // 消さない予定：表示していない保存分・日付が読めないバー・未配置バーに対応する予定
     for (const p of pages) {
       if (!p.result || !p.result.dates || !p.result.rows) continue;
       const cols = p.result.dates.columns;
@@ -2225,7 +2566,7 @@ async function runSync() {
             continue;
           }
           want.push({
-            bar,
+            bar, p, cols,
             body: gcal.makeEvent({
               summary: eventTitle(bar), location: site, description: eventDescription(p, c.rowIndex, bar, site),
               start: s, end: e, docKey: doc.syncKey, barUid: bar.uid,
@@ -2236,39 +2577,44 @@ async function runSync() {
       }
     }
     for (const r of unplaced) for (const b of r.bars || []) if (b.gcalId) keepIds.add(b.gcalId);
+    for (const b of calPending) if (b.gcalId) keepIds.add(b.gcalId);
 
-    const cal = await gcal.ensureCalendar();
-    calCreated = cal.created;
-    checkDoc();
-    const events = await gcal.listDocEvents(cal.id, doc.syncKey);
-    checkDoc();
-    const byId = new Map(events.map((ev) => [ev.id, ev]));
-    const byUid = new Map();
-    for (const ev of events) {
-      const u = gcal.eventBarUid(ev);
-      if (u && !byUid.has(u)) byUid.set(u, ev);
-    }
     const used = new Set();
-    // 作成・更新
     for (const w of want) {
       checkDoc();
-      let ev = (w.bar.gcalId && byId.get(w.bar.gcalId)) || byUid.get(w.bar.uid) || null;
+      let ev = (w.bar.gcalId && (taggedById.get(w.bar.gcalId) || allById.get(w.bar.gcalId)))
+        || taggedByUid.get(w.bar.uid) || null;
       if (ev && used.has(ev.id)) ev = null;
+      const snap = barSnapshotOf(w.bar, w.cols);
       if (ev) {
         used.add(ev.id);
-        if (w.bar.gcalId !== ev.id) { w.bar.gcalId = ev.id; saveIfSame(); }
-        if (gcal.sameEvent(ev, w.body)) n.same++;
-        else { await gcal.updateEvent(cal.id, ev.id, w.body); n.updated++; }
+        if (w.bar.gcalId !== ev.id) { w.bar.gcalId = ev.id; }
+        // 前回同期から両方とも変わっていなければ、説明文の書式差などで無駄に更新しない
+        const untouched = w.bar.lastSyncSnapshot && snapEq(w.bar.lastSyncSnapshot, snap)
+          && w.bar.gcalUpdated && ev.updated === w.bar.gcalUpdated;
+        if (untouched || gcal.sameEvent(ev, w.body)) {
+          n.same++;
+          w.bar.gcalUpdated = ev.updated || w.bar.gcalUpdated;
+          w.bar.lastSyncSnapshot = snap;
+        } else {
+          const res = await gcal.updateEvent(cal.id, ev.id, w.body);
+          n.updated++;
+          w.bar.gcalUpdated = (res && res.updated) || ev.updated || w.bar.gcalUpdated;
+          w.bar.lastSyncSnapshot = snap;
+        }
+        saveIfSame();
       } else {
         const made = await gcal.createEvent(cal.id, w.body);
         used.add(made.id);
         w.bar.gcalId = made.id;
+        w.bar.gcalUpdated = (made && made.updated) || w.bar.gcalUpdated;
+        w.bar.lastSyncSnapshot = snap;
         n.created++;
         saveIfSame(); // 予定IDをすぐ記録（途中で止まっても、次の同期で二重に作らない）
       }
     }
-    // バーが消えた予定の削除（作成・更新がすべて成功したときだけ）
-    for (const ev of events) {
+    // バーが消えた予定の削除（作成・更新がすべて成功したときだけ。対象はこのPDFの目印付き予定のみ）
+    for (const ev of tagged) {
       if (used.has(ev.id) || keepIds.has(ev.id)) continue;
       checkDoc();
       await gcal.deleteEvent(cal.id, ev.id);
@@ -2277,10 +2623,11 @@ async function runSync() {
     checkDoc();
     doc.lastSyncAt = Date.now();
     saveDoc();
-    let text = `同期しました（${fmtTime(doc.lastSyncAt)}）：作成 ${n.created}件・更新 ${n.updated}件・削除 ${n.deleted}件（変更なし ${n.same}件）`;
+    let text = `同期しました（${fmtTime(doc.lastSyncAt)}）：カレンダーから 追加 ${n.pullAdd}件・更新 ${n.pullUpd}件・削除 ${n.pullDel}件／カレンダーへ 作成 ${n.created}件・更新 ${n.updated}件・削除 ${n.deleted}件（変更なし ${n.same}件、競合で上書き ${n.conflicts}件、未配置 ${calPending.length}件）`;
     if (calCreated) text += `\n専用カレンダー「${gcal.CAL_NAME}」を新しく作りました。`;
     if (noDate) text += `\n※ 日付（月）が読めない列にあるバー ${noDate}本は同期していません。`;
-    if (keepIds.size) text += `\n※ 同期の対象外のバー（表示していない保存分・日付が読めないもの）の予定 ${keepIds.size}件は、そのまま残しています。`;
+    if (keepIds.size) text += `\n※ 同期の対象外のバー（表示していない保存分・日付が読めないもの・未配置）の予定 ${keepIds.size}件は、そのまま残しています。`;
+    if (calPending.length) text += `\n※ 未配置バーは、画面下の帯の一覧から行を選んで割り当てられます。`;
     if (saveStatus && !saveStatus.ok) text += "\n※ 予定IDを端末に保存できませんでした。";
     syncNote = { kind: saveStatus && !saveStatus.ok ? "error" : "ok", text };
   } catch (err) {
@@ -2293,12 +2640,12 @@ async function runSync() {
           : err.kind === "network" ? "電波のよい所で、もう一度「カレンダーと同期」を押してください。"
             : err.kind === "denied" ? "「連携設定」で「接続」を押し直してください。"
               : "";
-      const done = n.created + n.updated + n.deleted;
+      const done = n.pullAdd + n.pullUpd + n.pullDel + n.created + n.updated + n.deleted;
       syncNote = {
         kind: "error",
         text: `同期を途中で止めました。${reason}${hint ? "\n" + hint : ""}\n`
           + (done
-            ? `（止まるまでに：作成 ${n.created}件・更新 ${n.updated}件・削除 ${n.deleted}件。作った予定はバーと対応づけて記録済みなので、もう一度同期しても二重にはなりません。消える予定の削除は、全部の作成・更新が済んでから行います）`
+            ? `（止まるまでに：カレンダーから 追加 ${n.pullAdd}件・更新 ${n.pullUpd}件・削除 ${n.pullDel}件／カレンダーへ 作成 ${n.created}件・更新 ${n.updated}件・削除 ${n.deleted}件。作った予定はバーと対応づけて記録済みなので、もう一度同期しても二重にはなりません。消える予定の削除は、全部の作成・更新が済んでから行います）`
             : "（カレンダーの予定は変えていません）"),
       };
     }
