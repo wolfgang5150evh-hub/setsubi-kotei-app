@@ -1,11 +1,17 @@
-// 設備工程管理アプリ：第1段階
+// 設備工程管理アプリ
+// 第1段階
 //   ・PDFの読み込み・表示・拡大縮小・移動
 //   ・日付と行の読み取り＋重ね表示
 //   ・設備の行の差し込み（行の境目で画像を短冊に切り分け、差し込んだ分だけ下をずらして表示）
 //   ・設備の行へのバーの配置（ドラッグで移動、両端で伸縮、1行に複数）
+// 第2段階（前半）
+//   ・バーの編集（作業内容・開始日・終了日・下請け業者）の画面
+//   ・業者マスタ（登録・編集・削除、業者ごとの色）。バーは業者の色で表示
+//   ・設備工程の端末内への保存と、同じPDFを開いたときの復元（store.js）
 // PDFの描画には PDF.js（CDN）を使う。元のPDF画像は書き換えず、表示上の並べ替えだけで行を差し込む。
 import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs";
 import { analyzePage } from "./reader.js";
+import * as store from "./store.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
@@ -45,6 +51,26 @@ const equipPanel = document.getElementById("equip-panel");
 const equipInfo = document.getElementById("equip-info");
 const equipActions = document.getElementById("equip-actions");
 const dragTip = document.getElementById("drag-tip");
+// 編集画面（シート）
+const sheetBackdrop = document.getElementById("sheet-backdrop");
+const barSheetEl = document.getElementById("bar-sheet");
+const barRowEl = document.getElementById("bar-sheet-row");
+const barTaskEl = document.getElementById("bar-task");
+const barStartEl = document.getElementById("bar-start");
+const barEndEl = document.getElementById("bar-end");
+const barStartSel = document.getElementById("bar-start-sel");
+const barEndSel = document.getElementById("bar-end-sel");
+const barDaysEl = document.getElementById("bar-days");
+const barVendorEl = document.getElementById("bar-vendor");
+const barErrEl = document.getElementById("bar-error");
+const vendorSheetEl = document.getElementById("vendor-sheet");
+const vendorListEl = document.getElementById("vendor-list");
+const vendorFormTitle = document.getElementById("vendor-form-title");
+const vendorNameEl = document.getElementById("vendor-name");
+const vendorColorsEl = document.getElementById("vendor-colors");
+const vendorErrEl = document.getElementById("vendor-error");
+const btnVendorSave = document.getElementById("vendor-save");
+const btnVendorFormCancel = document.getElementById("vendor-form-cancel");
 
 // ---- 状態 ----
 let pdfDoc = null;
@@ -91,14 +117,24 @@ async function openFile(file) {
     showMessage("PDFファイルを選んでください。", true);
     return;
   }
-  if (hasEquipData() && !confirm("今の設備の行とバーは消えます（まだ保存できません）。別のPDFを開きますか？")) return;
+  // 設備の行とバーは変更のたびに端末へ保存しているので、ふつうは確認しない（同じPDFを開き直せば元に戻る）。
+  // 保存に失敗している場合だけ、消えることを確認する。
+  if (hasEquipData() && saveStatus && !saveStatus.ok
+      && !confirm("設備の行とバーを端末に保存できていません。\n別のPDFを開くと、保存できていない変更は消えます。開きますか？")) return;
+  closeSheets();
   showMessage("読み込み中…");
   fileNameEl.textContent = file.name;
   resetAnalysis();
   try {
     const data = new Uint8Array(await file.arrayBuffer());
+    // PDFの同一性（保存分を引き当てる目印）。PDF.js に渡すとデータが移されて読めなくなるので、先に計算する
+    const fileHash = await store.hashBytes(data);
     if (pdfDoc) await pdfDoc.destroy();
     pdfDoc = await pdfjsLib.getDocument({ data }).promise;
+    docInfo = {
+      id: fileHash, sig: null, replaceId: null,
+      fileName: file.name, fileSize: file.size, numPages: pdfDoc.numPages, range: null,
+    };
     await setupPages();
     fitToWidth();
     hideMessage();
@@ -136,7 +172,7 @@ async function setupPages() {
     pages.push({
       page, no: i, width: vp.width, height: vp.height, top: 0, left: 0, dispH: vp.height,
       el, imgBox, canvas, task: null, result: null, overlay: null,
-      equip: new Map(), cuts: [], cutByRow: new Map(), insH: 0, colors: null,
+      equip: new Map(), cuts: [], cutByRow: new Map(), insH: 0, colors: null, rowKeys: [],
       equipSvg: null, barEls: new Map(), selRect: null, cellRect: null,
     });
   }
@@ -463,6 +499,12 @@ window.addEventListener("resize", () => {
 
 // ---- キーボード（パソコン） ----
 window.addEventListener("keydown", (e) => {
+  // 編集画面を開いているときは、Esc で閉じるだけ（文字入力中の Delete でバーが消えないように）
+  if (isSheetOpen()) {
+    if (e.key === "Escape") cancelSheet();
+    return;
+  }
+  if (e.target && /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
   if (!pages.length) return;
   if (e.key === "Escape" && selection) { setSelection(null); return; }
   if ((e.key === "Delete" || e.key === "Backspace") && selection && selection.kind === "bar" && equipMode) {
@@ -501,6 +543,11 @@ function resetAnalysis() {
   equipReady = false;
   equipMode = false;
   hideTip();
+  // 保存・復元
+  docInfo = null;
+  unplaced = [];
+  restoreNote = "";
+  saveStatus = null;
   setEquipButton();
   updateEquipPanel();
 }
@@ -528,8 +575,13 @@ async function startAnalysis() {
     updateCuts(p);
     drawEquip(p);
   }
+  // 保存済みの設備の行とバーがあれば復元する
+  prepareDocKeys(list);
+  if (restoreSaved()) relayoutEquip();
   equipReady = list.some((p) => p.insH > 0);
   equipMode = equipReady; // 読み取りが終わったら、すぐ設備の行を入れられる状態にする
+  // 描いた時点ではまだ編集できない状態だったので、復元したバーもつかめるよう切り替える
+  for (const p of list) if (p.equipSvg) p.equipSvg.classList.toggle("editing", equipMode);
   setEquipButton();
   updateEquipPanel();
 }
@@ -728,9 +780,11 @@ function updateDock() {
 // ======================================================================
 // 設備の行の差し込み＋バーの配置
 // ======================================================================
-// データ（今はメモリ上だけ。保存は第2段階）：
-//   p.equip：Map（元の行の番号 0始まり → { rowIndex, bars: [{ id, start, end }] }）
-//   start・end：日付の列の番号（0始まり、両端を含む）。1列＝1日。
+// データ（変更のたびに端末へ保存。保存の形は store.js の説明を参照）：
+//   p.equip：Map（元の行の番号 0始まり → { rowIndex, bars: [{ id, start, end, task, vendorId }], keep }）
+//   start・end：日付の列の番号（0始まり、両端を含む）。1列＝1日。保存するときは日付（YYYY-MM-DD）に直す。
+//   task：作業内容（文字）。vendorId：業者のid（未設定は null）。
+//   keep：保存分のうち、この工程表の日付の範囲に入らず表示できなかったバー（消さずに保存し直す）。
 // 選択：selection = null
 //   | { kind: "row",   p, rowIndex }            元の行
 //   | { kind: "equip", p, rowIndex, col }       差し込んだ設備の行（col：タップした日の列。日付の欄の外なら null）
@@ -740,6 +794,21 @@ let equipReady = false;  // 読み取りが終わり、差し込める行があ�
 let selection = null;
 let barDrag = null;      // バーをドラッグ中の情報
 let barSeq = 0;
+
+// 保存・復元
+let docInfo = null;      // 開いているPDF：{ id（中身のハッシュ）, sig（中身の目印）, replaceId, fileName, fileSize, numPages, range }
+let unplaced = [];       // 保存分のうち、行が見つからず表示できなかった設備の行（消さずに保存し直す）
+let restoreNote = "";    // 復元したときのお知らせ（下の帯に出す）
+let saveStatus = null;   // null（まだ保存していない）| { ok: true, at: Date } | { ok: false, msg }
+
+// 業者マスタ
+const UNSET_COLOR = "#8a8a8a"; // 業者未設定のバーの色（破線で表示）
+let vendors = store.loadVendors();
+let lastVendorId = null;       // 直前に選んだ業者（新しく置くバーに使う）
+function vendorById(id) {
+  return (id && vendors.find((v) => v.id === id)) || null;
+}
+store.requestPersist();
 
 function setEquipButton() {
   btnEquip.disabled = !equipReady;
@@ -818,12 +887,17 @@ function equipReport() {
     for (const c of p.cuts) {
       const ins = p.equip.get(c.rowIndex);
       const bars = [...ins.bars].sort((a, b) => a.start - b.start || a.end - b.end);
-      lines.push(`  ・${rowFullName(p, c.rowIndex)}／${EQUIP_LABEL}：バー${bars.length}本`
-        + (bars.length ? "　" + bars.map((b) => barRangeText(p, b, false)).join("、") : ""));
+      lines.push(`  ・${rowFullName(p, c.rowIndex)}／${EQUIP_LABEL}：バー${bars.length}本`);
+      for (const b of bars) {
+        const v = vendorById(b.vendorId);
+        lines.push(`      ${barRangeText(p, b, false)}　${b.task ? `「${b.task}」` : "（作業内容なし）"}　${v ? v.name : "業者未設定"}`);
+      }
+      if (ins.keep && ins.keep.length) lines.push(`      ほかに日付の範囲外のバー ${ins.keep.length}本（保存のみ）`);
     }
   }
+  if (unplaced.length) lines.push(`  ・行が見つからず表示していない設備の行：${unplaced.map((r) => r.key).join("、")}（保存のみ）`);
   if (!lines.length) return "";
-  return `【設備の行】${lines.length}行（※まだ保存はできません。表示と操作のみ）\n${lines.join("\n")}`;
+  return `【設備の行】${lines.length}行（端末に保存）\n${lines.join("\n")}`;
 }
 
 // ---- 列・棟の欄の色を、描いた画像から調べる ----
@@ -1045,7 +1119,15 @@ function positionBar(p, cut, bar, els, lane, laneCount) {
   setA(els.tick, { x1: x0 + 0.4, y1: ly - a * 0.6, x2: x0 + 0.4, y2: ly + a * 0.6, "stroke-width": sw });
   setA(els.head, { points: `${x1},${ly} ${x1 - a},${ly - a * 0.55} ${x1 - a},${ly + a * 0.55}` });
   setA(els.label, { x: x0 + 1, y: ly - sw / 2 - fs * 0.3, "font-size": fs });
-  els.label.textContent = barShortLabel(cols, bar);
+  // 業者の色で表示（未設定は灰色の破線）。線の上には作業内容（無ければ日付）
+  const v = vendorById(bar.vendorId);
+  const color = v ? v.color : UNSET_COLOR;
+  els.line.style.stroke = color;
+  els.line.style.strokeDasharray = v ? "" : `${r1(sw * 2.5)} ${r1(sw * 1.5)}`;
+  els.tick.style.stroke = color;
+  els.head.style.fill = color;
+  els.label.style.fill = color;
+  els.label.textContent = bar.task ? bar.task : barShortLabel(cols, bar);
   setA(els.sel, { x: x0 - 0.5, y: top + 0.3, width: w + 1, height: Math.max(0.5, laneH - 0.6) });
   const hr = Math.max(0.8, Math.min(2.2, laneH * 0.28));
   setA(els.hL, { cx: x0, cy: ly, r: hr });
@@ -1156,10 +1238,11 @@ function onBarDown(e, p, rowIndex, barId, mode) {
   const bar = ins && ins.bars.find((b) => b.id === barId);
   if (!bar) return;
   try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* 取れなくても動く */ }
+  const wasSelected = !!(selection && selection.kind === "bar" && selection.p === p && selection.barId === barId);
   barDrag = {
     id: e.pointerId, p, rowIndex, bar, mode,
     cx: e.clientX, cy: e.clientY, x: localX(p, e.clientX),
-    start: bar.start, end: bar.end, moved: false,
+    start: bar.start, end: bar.end, moved: false, wasSelected,
   };
   setSelection({ kind: "bar", p, rowIndex, barId });
 }
@@ -1193,12 +1276,15 @@ function onBarMove(e) {
 function onBarUp(e) {
   if (!barDrag || e.pointerId !== barDrag.id) return;
   e.stopPropagation();
-  const { bar } = barDrag;
+  const { bar, p, rowIndex } = barDrag;
   const changed = barDrag.moved && (bar.start !== barDrag.start || bar.end !== barDrag.end);
+  // 選んであるバーを、動かさずにもう一度タップしたら編集画面を開く
+  const openEdit = e.type === "pointerup" && !barDrag.moved && barDrag.wasSelected;
   barDrag = null;
   hideTip();
-  if (changed) refreshReportText();
+  if (changed) equipChanged();
   updateEquipPanel();
+  if (openEdit) openBarSheet(p, rowIndex, bar.id, false);
 }
 
 // ドラッグ中の日付の吹き出し（指で隠れないよう、指の少し上に出す）
@@ -1232,30 +1318,38 @@ function relayoutEquip() {
 
 function insertEquipRow(p, i) {
   if (!p.insH || p.equip.has(i)) return;
-  p.equip.set(i, { rowIndex: i, bars: [] });
+  p.equip.set(i, { rowIndex: i, bars: [], keep: [] });
   relayoutEquip();
+  equipChanged();
   setSelection({ kind: "equip", p, rowIndex: i, col: null });
 }
 
 function removeEquipRow(p, i) {
   const ins = p.equip.get(i);
   if (!ins) return;
-  if (ins.bars.length && !confirm(`「${rowFullName(p, i)}」の設備の行には、バーが${ins.bars.length}本あります。\nバーごと行を取り消しますか？`)) return;
+  const n = ins.bars.length + (ins.keep ? ins.keep.length : 0);
+  if (n && !confirm(`「${rowFullName(p, i)}」の設備の行には、バーが${n}本あります。\nバーごと行を取り消しますか？（保存分からも消えます）`)) return;
   p.equip.delete(i);
   relayoutEquip();
+  equipChanged();
   setSelection({ kind: "row", p, rowIndex: i });
 }
 
+// 「ここにバーを置く」：置いたらすぐ編集画面を開き、作業内容・業者を入れてもらう
 function addBar(p, i, col) {
   const ins = p.equip.get(i);
   if (!ins) return;
   const n = p.result.dates.columns.length;
   const start = Math.min(n - 1, Math.max(0, col));
-  const bar = { id: ++barSeq, start, end: Math.min(n - 1, start + DEFAULT_BAR_DAYS - 1) };
+  const bar = {
+    id: ++barSeq, start, end: Math.min(n - 1, start + DEFAULT_BAR_DAYS - 1),
+    task: "", vendorId: vendorById(lastVendorId) ? lastVendorId : null,
+  };
   ins.bars.push(bar);
   drawEquip(p);
+  equipChanged();
   setSelection({ kind: "bar", p, rowIndex: i, barId: bar.id });
-  refreshReportText();
+  openBarSheet(p, i, bar.id, true);
 }
 
 function deleteBar(p, i, barId) {
@@ -1263,7 +1357,13 @@ function deleteBar(p, i, barId) {
   if (!ins) return;
   ins.bars = ins.bars.filter((b) => b.id !== barId);
   drawEquip(p);
+  equipChanged();
   setSelection({ kind: "equip", p, rowIndex: i, col: null });
+}
+
+// 設備の行・バーが変わったら：端末に保存し、「詳しく」の一覧も直す
+function equipChanged() {
+  saveDoc();
   refreshReportText();
 }
 
@@ -1291,7 +1391,10 @@ function updateEquipPanel() {
     const s = selection;
     if (!s) {
       const { rowsN, barsN } = equipCounts();
-      equipInfo.textContent = `表の行をタップして選ぶと、その下に「${EQUIP_LABEL}」の行を入れられます。（設備の行 ${rowsN}行・バー ${barsN}本）`;
+      equipInfo.textContent = (restoreNote ? restoreNote + "\n" : "")
+        + `表の行をタップして選ぶと、その下に「${EQUIP_LABEL}」の行を入れられます。（設備の行 ${rowsN}行・バー ${barsN}本）\n`
+        + saveStatusText();
+      addAction("業者の登録・編集", () => openVendorSheet(false));
     } else {
       const p = s.p;
       const base = rowFullName(p, s.rowIndex);
@@ -1317,14 +1420,507 @@ function updateEquipPanel() {
           updateEquipPanel();
           return;
         }
-        equipInfo.textContent = `${base}／${EQUIP_LABEL}　${barRangeText(p, bar, true)}`;
-        if (!barDrag) addAction("バーを削除", () => deleteBar(p, s.rowIndex, s.barId), "danger");
+        const v = vendorById(bar.vendorId);
+        equipInfo.textContent = `${base}／${EQUIP_LABEL}\n${barRangeText(p, bar, true)}　`
+          + `${bar.task ? `「${bar.task}」` : "（作業内容なし）"}　業者：${v ? v.name : "未設定"}`;
+        if (!barDrag) {
+          addAction("編集", () => openBarSheet(p, s.rowIndex, s.barId, false), "primary");
+          addAction("バーを削除", () => deleteBar(p, s.rowIndex, s.barId), "danger");
+        }
       }
+      if (saveStatus && !saveStatus.ok) equipInfo.textContent += "\n" + saveStatusText();
       if (!barDrag) addAction("×", () => setSelection(null), "", "選択を解除");
     }
   }
   updateDock();
 }
+
+// ======================================================================
+// 保存と復元（第2段階）
+// ======================================================================
+// ・変更（行の差し込み・取り消し、バーの追加・移動・伸縮・編集・削除）のたびに自動で保存する。
+// ・PDFを開いて読み取りが終わったら、保存分を探して復元する。
+//   探し方：①同じファイル（中身のハッシュ）→ ②同じ中身の目印（ページ数・日付の範囲・項目名の一覧）
+// ・行は「棟名付きの項目名」（rowKeys）で、バーは「日付」で当てはめる。
+const pad2 = (n) => String(n).padStart(2, "0");
+function colISO(c) {
+  return c && c.year && c.month ? `${c.year}-${pad2(c.month)}-${pad2(c.day)}` : null;
+}
+
+// 行の呼び名（保存のキー）：「棟名／項目名」。同じ呼び名が2つ目以降は「#2」などを付けて区別する
+function rowKeyBase(row) {
+  return (row.group ? row.group + "／" : "") + (row.name || "（項目名なし）");
+}
+
+// 各ページの行のキーと、PDFの中身の目印（sig）を作る
+function prepareDocKeys(list) {
+  const seen = new Map();
+  const parts = [];
+  let from = null;
+  let to = null;
+  for (const p of list) {
+    p.rowKeys = [];
+    const r = p.result;
+    if (!r || !r.dates || !r.rows) { parts.push("-"); continue; }
+    r.rows.items.forEach((row, i) => {
+      const base = rowKeyBase(row);
+      const n = (seen.get(base) || 0) + 1;
+      seen.set(base, n);
+      p.rowKeys[i] = n > 1 ? `${base}#${n}` : base;
+    });
+    const cols = r.dates.columns;
+    const a = colISO(cols[0]);
+    const b = colISO(cols[cols.length - 1]);
+    if (!from && a) from = a;
+    if (b) to = b;
+    parts.push(`${a || "?" + cols[0].day}~${b || "?" + cols[cols.length - 1].day}/${cols.length}/${r.rows.items.length}/${store.hashText(p.rowKeys.join("\n"))}`);
+  }
+  if (docInfo) {
+    docInfo.sig = `${list.length}p|${parts.join("|")}`;
+    docInfo.range = { from, to };
+  }
+}
+
+function findRowByKey(key) {
+  for (const p of pages) {
+    if (!p.insH) continue;
+    const i = p.rowKeys.indexOf(key);
+    if (i >= 0) return { p, i };
+  }
+  return null;
+}
+
+// 保存した日付 → 列の番号（無ければ null）。日付が無い保存分（月が読めなかった表）は列の番号で
+function dateToCol(cols, iso, col) {
+  if (iso) {
+    const i = cols.findIndex((c) => colISO(c) === iso);
+    return i >= 0 ? i : null;
+  }
+  return Number.isInteger(col) && col >= 0 && col < cols.length ? col : null;
+}
+
+// 保存分を探して復元する。行を1つでも復元したら true
+function restoreSaved() {
+  if (!docInfo || !docInfo.sig) return false;
+  let found = null;
+  try {
+    found = store.findDoc(docInfo.id, docInfo.sig);
+  } catch (err) {
+    console.warn("保存分の読み込みに失敗", err);
+  }
+  if (!found) return false;
+  const rec = found.rec;
+  docInfo.replaceId = rec.id !== docInfo.id ? rec.id : null;
+  unplaced = [];
+  let nRows = 0;
+  let nBars = 0;
+  let kept = 0;
+  for (const r of rec.rows || []) {
+    const t = findRowByKey(r.key);
+    if (!t || t.p.equip.has(t.i)) { unplaced.push(r); continue; }
+    const cols = t.p.result.dates.columns;
+    const ins = { rowIndex: t.i, bars: [], keep: [] };
+    for (const b of r.bars || []) {
+      const s = dateToCol(cols, b.start, b.startCol);
+      const e = dateToCol(cols, b.end, b.endCol);
+      if (s === null || e === null || e < s) { ins.keep.push(b); kept++; continue; }
+      ins.bars.push({ id: ++barSeq, start: s, end: e, task: b.task || "", vendorId: b.vendorId || null });
+      nBars++;
+    }
+    t.p.equip.set(t.i, ins);
+    nRows++;
+  }
+  const notes = [];
+  if (found.how === "file") notes.push(`前回保存した設備の行 ${nRows}行・バー ${nBars}本を復元しました。`);
+  else notes.push(`同じ内容のPDF（${rec.fileName || "名前不明"}）で保存した設備の行 ${nRows}行・バー ${nBars}本を復元しました。`);
+  if (unplaced.length) notes.push(`※ 行が見つからない設備の行が ${unplaced.length}行あり、表示していません（保存データには残しています）。`);
+  if (kept) notes.push(`※ 工程表の日付の範囲外のバーが ${kept}本あり、表示していません（保存データには残しています）。`);
+  restoreNote = notes.join("\n");
+  return nRows > 0;
+}
+
+// 今の設備の行とバーを、保存する形に直す
+function serializeRows() {
+  const out = [];
+  for (const p of pages) {
+    if (!p.result || !p.result.rows || !p.result.dates) continue;
+    const cols = p.result.dates.columns;
+    for (const c of p.cuts) {
+      const ins = p.equip.get(c.rowIndex);
+      const row = p.result.rows.items[c.rowIndex];
+      const bars = [...ins.bars]
+        .sort((a, b) => a.start - b.start || a.end - b.end || a.id - b.id)
+        .map((b) => ({
+          task: b.task || "", vendorId: b.vendorId || null,
+          start: colISO(cols[b.start]), end: colISO(cols[b.end]), startCol: b.start, endCol: b.end,
+        }));
+      out.push({
+        key: p.rowKeys[c.rowIndex], group: row.group || "", name: row.name || "", page: p.no, rowNo: row.no,
+        bars: bars.concat(ins.keep || []),
+      });
+    }
+  }
+  return out.concat(unplaced);
+}
+
+function saveDoc() {
+  if (!docInfo || !docInfo.sig) return;
+  try {
+    const rows = serializeRows();
+    if (rows.length) {
+      store.putDoc({
+        id: docInfo.id, sig: docInfo.sig, fileName: docInfo.fileName, fileSize: docInfo.fileSize,
+        numPages: docInfo.numPages, range: docInfo.range, rows,
+      }, docInfo.replaceId);
+    } else {
+      // 設備の行がすべて無くなったら、このPDFの記録ごと消す
+      store.deleteDoc(docInfo.id);
+      if (docInfo.replaceId) store.deleteDoc(docInfo.replaceId);
+    }
+    docInfo.replaceId = null;
+    saveStatus = { ok: true, at: new Date() };
+  } catch (err) {
+    console.error("保存に失敗", err);
+    saveStatus = { ok: false, msg: String((err && err.message) || err) };
+  }
+}
+
+function saveStatusText() {
+  if (!saveStatus) return "変更は自動で端末に保存され、同じPDFを開き直すと元に戻ります。";
+  if (saveStatus.ok) return `端末に保存済み（${pad2(saveStatus.at.getHours())}:${pad2(saveStatus.at.getMinutes())}）。同じPDFを開き直すと元に戻ります。`;
+  return `※ 端末に保存できませんでした（${saveStatus.msg}）。空き容量やプライベートブラウズを確認してください。`;
+}
+
+// ======================================================================
+// 編集画面（シート）：バーの編集・業者マスタ
+// ======================================================================
+let barSheet = null;      // 編集中のバー：{ p, rowIndex, barId, cols, dateMode }
+let vendorBack = false;   // 業者の画面を閉じたら、バーの編集画面に戻るか
+let vendorEditId = null;  // 業者の画面で編集中の業者（null＝新しく登録）
+let vendorColor = null;   // 業者の画面で選んでいる色
+let lastAddedVendorId = null;
+
+function isSheetOpen() {
+  return !sheetBackdrop.classList.contains("hidden");
+}
+function showSheet(el) {
+  sheetBackdrop.classList.remove("hidden");
+  barSheetEl.classList.toggle("hidden", el !== barSheetEl);
+  vendorSheetEl.classList.toggle("hidden", el !== vendorSheetEl);
+}
+function closeSheets() {
+  sheetBackdrop.classList.add("hidden");
+  barSheetEl.classList.add("hidden");
+  vendorSheetEl.classList.add("hidden");
+  barSheet = null;
+  vendorBack = false;
+}
+// Esc・背景のタップ：今の画面を閉じる（業者の画面からはバーの編集画面に戻る）
+function cancelSheet() {
+  if (!vendorSheetEl.classList.contains("hidden")) closeVendorSheet();
+  else closeSheets();
+}
+sheetBackdrop.addEventListener("click", (e) => {
+  if (e.target === sheetBackdrop) cancelSheet();
+});
+
+// ---- バーの編集 ----
+function openBarSheet(p, rowIndex, barId, isNew) {
+  const bar = findBar(p, rowIndex, barId);
+  if (!bar) return;
+  const cols = p.result.dates.columns;
+  // 全部の列に年月日が読めていれば日付の入力欄、読めない列があれば列の一覧から選ぶ形にする
+  const dateMode = cols.every((c) => colISO(c));
+  barSheet = { p, rowIndex, barId, cols, dateMode };
+  document.getElementById("bar-sheet-title").textContent = isNew ? "バーを置きました：内容を入れてください" : "バーの編集";
+  barRowEl.textContent = `${rowFullName(p, rowIndex)}／${EQUIP_LABEL}`;
+  barTaskEl.value = bar.task || "";
+  for (const [inp, sel, v] of [[barStartEl, barStartSel, bar.start], [barEndEl, barEndSel, bar.end]]) {
+    inp.classList.toggle("hidden", !dateMode);
+    sel.classList.toggle("hidden", dateMode);
+    if (dateMode) {
+      inp.min = colISO(cols[0]);
+      inp.max = colISO(cols[cols.length - 1]);
+      inp.value = colISO(cols[v]);
+    } else {
+      sel.textContent = "";
+      cols.forEach((c, i) => {
+        const o = document.createElement("option");
+        o.value = String(i);
+        o.textContent = colDate(c, true);
+        sel.appendChild(o);
+      });
+      sel.value = String(v);
+    }
+  }
+  fillVendorSelect(bar.vendorId);
+  barErrEl.textContent = "";
+  updateBarDays();
+  showSheet(barSheetEl);
+}
+
+function fillVendorSelect(selectedId) {
+  barVendorEl.textContent = "";
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = vendors.length ? "（未設定）" : "（未設定：先に業者を登録してください）";
+  barVendorEl.appendChild(none);
+  for (const v of vendors) {
+    const o = document.createElement("option");
+    o.value = v.id;
+    o.textContent = `● ${v.name}`;
+    o.style.color = v.color;
+    barVendorEl.appendChild(o);
+  }
+  barVendorEl.value = vendorById(selectedId) ? selectedId : "";
+  updateVendorSwatch();
+}
+function updateVendorSwatch() {
+  const v = vendorById(barVendorEl.value);
+  barVendorEl.style.borderLeftColor = v ? v.color : UNSET_COLOR;
+}
+
+// 入力欄から列の番号を読む。null＝未入力、-1＝工程表にない日付
+function readBarCol(inp, sel) {
+  if (!barSheet) return null;
+  if (!barSheet.dateMode) return sel.value === "" ? null : Number(sel.value);
+  if (!inp.value) return null;
+  const i = barSheet.cols.findIndex((c) => colISO(c) === inp.value);
+  return i >= 0 ? i : -1;
+}
+function rangeText(cols) {
+  return `${colDate(cols[0], true)}〜${colDate(cols[cols.length - 1], true)}`;
+}
+function checkBarDates() {
+  const cols = barSheet.cols;
+  const s = readBarCol(barStartEl, barStartSel);
+  const e = readBarCol(barEndEl, barEndSel);
+  if (s === null || e === null) return { err: "開始日と終了日を入れてください。" };
+  if (s === -1 || e === -1) return { err: `この工程表にない日付です。${rangeText(cols)} の間で選んでください。` };
+  if (e < s) return { err: "終了日が開始日より前になっています。" };
+  return { s, e };
+}
+function updateBarDays() {
+  if (!barSheet) return;
+  const r = checkBarDates();
+  if (r.err) {
+    barDaysEl.textContent = r.err;
+    barDaysEl.classList.add("warn");
+  } else {
+    const cols = barSheet.cols;
+    barDaysEl.textContent = `${colDate(cols[r.s], false)}〜${colDate(cols[r.e], false)}（${r.e - r.s + 1}日間）`;
+    barDaysEl.classList.remove("warn");
+  }
+}
+for (const el of [barStartEl, barEndEl, barStartSel, barEndSel]) {
+  el.addEventListener("input", updateBarDays);
+  el.addEventListener("change", updateBarDays);
+}
+barVendorEl.addEventListener("change", updateVendorSwatch);
+barTaskEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); commitBarSheet(); }
+});
+
+function commitBarSheet() {
+  if (!barSheet) return;
+  const { p, rowIndex, barId } = barSheet;
+  const bar = findBar(p, rowIndex, barId);
+  if (!bar) { closeSheets(); return; }
+  const r = checkBarDates();
+  if (r.err) { barErrEl.textContent = r.err; return; }
+  bar.task = barTaskEl.value.trim();
+  bar.start = r.s;
+  bar.end = r.e;
+  bar.vendorId = barVendorEl.value || null;
+  if (bar.vendorId) lastVendorId = bar.vendorId;
+  closeSheets();
+  drawEquip(p);
+  equipChanged();
+  setSelection({ kind: "bar", p, rowIndex, barId });
+}
+
+document.getElementById("bar-ok").addEventListener("click", commitBarSheet);
+document.getElementById("bar-cancel").addEventListener("click", closeSheets);
+document.getElementById("bar-delete").addEventListener("click", () => {
+  if (!barSheet) return;
+  const { p, rowIndex, barId } = barSheet;
+  closeSheets();
+  deleteBar(p, rowIndex, barId);
+});
+document.getElementById("bar-vendor-manage").addEventListener("click", () => openVendorSheet(true));
+
+// ---- 業者マスタ ----
+function openVendorSheet(fromBar) {
+  vendorBack = !!(fromBar && barSheet);
+  lastAddedVendorId = null;
+  resetVendorForm();
+  renderVendorList();
+  showSheet(vendorSheetEl);
+}
+function closeVendorSheet() {
+  if (vendorBack && barSheet) {
+    // バーの編集画面に戻る（入力途中の内容はそのまま。新しく登録した業者があれば選んでおく）
+    fillVendorSelect(lastAddedVendorId || barVendorEl.value);
+    vendorBack = false;
+    showSheet(barSheetEl);
+  } else {
+    closeSheets();
+  }
+}
+document.getElementById("vendor-close").addEventListener("click", closeVendorSheet);
+
+function renderVendorList() {
+  vendorListEl.textContent = "";
+  if (!vendors.length) {
+    const li = document.createElement("li");
+    li.className = "vendor-empty";
+    li.textContent = "まだ登録がありません。下の欄から登録してください。";
+    vendorListEl.appendChild(li);
+    return;
+  }
+  for (const v of vendors) {
+    const li = document.createElement("li");
+    li.className = "vendor-item" + (v.id === vendorEditId ? " editing" : "");
+    const sw = document.createElement("span");
+    sw.className = "vendor-swatch";
+    sw.style.background = v.color;
+    const name = document.createElement("span");
+    name.className = "vendor-name";
+    name.textContent = v.name;
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "btn-small";
+    edit.textContent = "編集";
+    edit.addEventListener("click", () => startEditVendor(v));
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "btn-small danger";
+    del.textContent = "削除";
+    del.addEventListener("click", () => deleteVendor(v));
+    li.append(sw, name, edit, del);
+    vendorListEl.appendChild(li);
+  }
+}
+
+function renderColorChoices() {
+  vendorColorsEl.textContent = "";
+  for (const c of store.VENDOR_COLORS) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "color-choice" + (c.color === vendorColor ? " selected" : "");
+    b.style.background = c.color;
+    b.setAttribute("role", "radio");
+    b.setAttribute("aria-checked", c.color === vendorColor ? "true" : "false");
+    b.setAttribute("aria-label", c.name);
+    b.title = c.name;
+    // 他の業者が使っている色には小さな印（同じ色も選べるが、見分けにくくなるため）
+    const usedBy = vendors.filter((v) => v.color === c.color && v.id !== vendorEditId);
+    if (usedBy.length) {
+      b.classList.add("used");
+      b.title += `（使用中：${usedBy.map((v) => v.name).join("、")}）`;
+    }
+    b.addEventListener("click", () => { vendorColor = c.color; renderColorChoices(); });
+    vendorColorsEl.appendChild(b);
+  }
+}
+
+function resetVendorForm() {
+  vendorEditId = null;
+  vendorNameEl.value = "";
+  // まだ誰も使っていない色を最初に選んでおく
+  const free = store.VENDOR_COLORS.find((c) => !vendors.some((v) => v.color === c.color));
+  vendorColor = (free || store.VENDOR_COLORS[vendors.length % store.VENDOR_COLORS.length]).color;
+  vendorFormTitle.textContent = "新しい業者を登録";
+  btnVendorSave.textContent = "登録";
+  btnVendorFormCancel.classList.add("hidden");
+  vendorErrEl.textContent = "";
+  renderColorChoices();
+}
+
+function startEditVendor(v) {
+  vendorEditId = v.id;
+  vendorNameEl.value = v.name;
+  vendorColor = v.color;
+  vendorFormTitle.textContent = `「${v.name}」を編集`;
+  btnVendorSave.textContent = "変更を保存";
+  btnVendorFormCancel.classList.remove("hidden");
+  vendorErrEl.textContent = "";
+  renderColorChoices();
+  renderVendorList();
+  vendorNameEl.focus();
+}
+
+function saveVendor() {
+  const name = vendorNameEl.value.trim();
+  if (!name) { vendorErrEl.textContent = "業者名を入れてください。"; return; }
+  if (vendors.some((v) => v.name === name && v.id !== vendorEditId)) {
+    vendorErrEl.textContent = "同じ名前の業者がすでに登録されています。";
+    return;
+  }
+  const before = vendors;
+  if (vendorEditId) {
+    vendors = vendors.map((v) => (v.id === vendorEditId ? { ...v, name, color: vendorColor } : v));
+  } else {
+    const v = { id: store.newId("v"), name, color: vendorColor };
+    vendors = [...vendors, v];
+    lastAddedVendorId = v.id;
+  }
+  try {
+    store.saveVendors(vendors);
+  } catch (err) {
+    vendors = before;
+    vendorErrEl.textContent = "端末に保存できませんでした：" + ((err && err.message) || err);
+    return;
+  }
+  resetVendorForm();
+  renderVendorList();
+  vendorsChanged();
+}
+
+function deleteVendor(v) {
+  let n = 0;
+  try { n = store.countVendorUse(v.id); } catch { /* 数えられなくても消せる */ }
+  const msg = `業者「${v.name}」を削除しますか？`
+    + (n ? `\n\n保存済みのバー ${n}本で使われています。削除すると、そのバーは「業者未設定」（灰色の破線）になります。` : "");
+  if (!confirm(msg)) return;
+  const before = vendors;
+  vendors = vendors.filter((x) => x.id !== v.id);
+  try {
+    store.saveVendors(vendors);
+    store.clearVendorRefs(v.id);
+  } catch (err) {
+    vendors = before;
+    vendorErrEl.textContent = "端末に保存できませんでした：" + ((err && err.message) || err);
+    return;
+  }
+  // 開いているPDFのバー（表示できなかった保存分も含む）からも外す
+  const clear = (b) => { if (b.vendorId === v.id) b.vendorId = null; };
+  for (const p of pages) {
+    for (const ins of p.equip.values()) { ins.bars.forEach(clear); (ins.keep || []).forEach(clear); }
+  }
+  for (const r of unplaced) (r.bars || []).forEach(clear);
+  if (lastVendorId === v.id) lastVendorId = null;
+  if (lastAddedVendorId === v.id) lastAddedVendorId = null;
+  if (hasEquipData()) saveDoc();
+  if (vendorEditId === v.id) resetVendorForm();
+  else renderColorChoices();
+  renderVendorList();
+  vendorsChanged();
+}
+
+// 業者の名前・色が変わったら、バーを描き直す
+function vendorsChanged() {
+  for (const p of pages) if (p.equipSvg) drawEquip(p);
+  applySelectionVisuals();
+  refreshReportText();
+  updateEquipPanel();
+}
+
+btnVendorSave.addEventListener("click", saveVendor);
+btnVendorFormCancel.addEventListener("click", () => { resetVendorForm(); renderVendorList(); });
+vendorNameEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); saveVendor(); }
+});
 
 // ---- PWA：サービスワーカー登録（http/https のときだけ） ----
 if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
