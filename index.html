@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#1f4e79">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="設備工程">
+  <title>設備工程管理</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="toolbar">
+    <label class="btn btn-main" for="file-input">PDFを開く</label>
+    <input id="file-input" type="file" accept="application/pdf,.pdf" hidden>
+    <span id="file-name" class="file-name">ファイル未選択</span>
+    <div class="zoom-group">
+      <button id="btn-zoom-out" class="btn" type="button" aria-label="縮小">－</button>
+      <span id="zoom-label" class="zoom-label">--%</span>
+      <button id="btn-zoom-in" class="btn" type="button" aria-label="拡大">＋</button>
+      <button id="btn-fit" class="btn" type="button" aria-label="幅に合わせる">幅</button>
+      <button id="btn-overlay" class="btn btn-toggle" type="button" aria-label="読み取り結果の重ね表示（オン・オフ）" aria-pressed="false" disabled>読取</button>
+      <button id="btn-equip" class="btn btn-toggle btn-equip" type="button" aria-label="設備の行とバーの編集（オン・オフ）" aria-pressed="false" disabled>設備</button>
+    </div>
+  </header>
+
+  <main id="viewer" class="viewer">
+    <div id="stage" class="stage"></div>
+    <div id="message" class="message">
+      「PDFを開く」から工程表のPDFを選んでください。<br>
+      2本指で拡大縮小、1本指で移動できます。<br>
+      パソコンでは、ホイールで拡大縮小、ドラッグで移動、Shift＋ホイールで横移動です。<br>
+      読み取りが終わったら、行をタップして「設備工事」の行を入れられます。
+    </div>
+    <!-- バーをドラッグ中の日付の吹き出し -->
+    <div id="drag-tip" class="drag-tip hidden"></div>
+  </main>
+
+  <!-- 画面下の帯 -->
+  <footer id="bottom-dock" class="bottom-dock hidden">
+    <!-- 設備の行・バーの操作 -->
+    <section id="equip-panel" class="equip-panel hidden">
+      <div id="equip-info" class="equip-info"></div>
+      <div id="equip-actions" class="equip-actions"></div>
+    </section>
+
+    <!-- 読み取り結果（日付の列・行と項目名）のまとめ -->
+    <section id="read-panel" class="read-panel hidden">
+      <div class="read-bar">
+        <span id="read-summary" class="read-summary"></span>
+        <button id="btn-read-detail" class="btn-small" type="button">詳しく</button>
+      </div>
+      <div id="read-detail" class="read-detail hidden">
+        <button id="btn-read-copy" class="btn-small" type="button">結果をコピー</button>
+        <pre id="read-detail-text" class="read-detail-text"></pre>
+      </div>
+    </section>
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
